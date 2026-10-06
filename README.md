@@ -1,21 +1,23 @@
 # whobreaks
 
-Report every item that references the one you are about to delete, including the Experience
-Builder drafts the dependency graph never opens.
+Report every item that references the one you are about to delete, by reading the configuration
+of every item in the organization, whatever its type.
 
 You delete a service nobody appears to use. The portal asked for one confirmation, the
 dependency graph was empty, and nothing in the item page said anybody depended on it. A week
 later a public Experience Builder app shows an empty map. The link between the two was a line in
 a widget config that no portal screen ever displayed, and the delete is not reversible.
 
-`arcgis.apps.itemgraph` is the obvious tool, and it does more than most people think.
-`create_dependency_graph` accepts `include_reverse`, `ItemNode.contained_by()` and
-`ItemNode.required_by()` both exist, and that traversal is far less code than this one. It is
-built on `item.related_items(direction="reverse")`, which returns **the relationships the portal
-has registered**. It never opens `/content/items/{id}/data` or `/content/items/{id}/resources`.
-An item id that lives only inside an Experience Builder widget config, a dashboard dataset
-binding, a StoryMap draft resource or a notebook string literal is invisible to it in both
-directions, because no relationship was ever registered for it. That gap is the whole tool.
+`arcgis.apps.itemgraph` is the obvious tool, and it does a lot. In arcgis 2.4.2 it reads
+`/data` for web maps, dashboards, Experience Builder apps, StoryMaps and Hub sites. It also reads
+their known draft resources, such as `config/config.json` and the StoryMap draft, and
+`ItemNode.required_by()` walks the graph in reverse. It parses the item types it knows, by the
+keys it knows. To find the item behind a web map layer's url, it requests that url.
+
+This tool takes a different approach. It reads every item of any type, and every JSON resource
+of each one, and it searches notebooks and text bodies too. It matches the id as a whole token,
+so an id inside a longer id is not a hit. It sorts each hit into a hard break, a soft break or
+a mention, and leaves thumbnails out. It never opens a url that it finds inside an item.
 
 The break does not stop at the first item. The web map that loads the service goes blank, and
 so does every app and site that loads the web map. The same sweep that reads every item for
@@ -24,7 +26,7 @@ break three hops out without one more portal call. It follows hard breaks only. 
 filters on the target still draws, and a story that names an item in a paragraph breaks
 nothing, so neither passes a break on to whatever loads it.
 
-A reference by service url is the other half. A dependency monitor can resolve a url that it
+A reference by service url is the other half. A dependency tool can resolve a url that it
 finds inside an item by requesting that url with the admin session. Then any item author can
 make the admin token call a server of their choosing. This tool reads the target item's own
 `url` once, and searches every configuration for it as text. No url found inside an item is ever
@@ -161,7 +163,7 @@ PASS  and the token that call carried is not in the message  <-- pinned defect
 ...
 PASS  and the half that arrived is no longer JSON, so it comes back as text to be searched as prose  <-- pinned defect
 ...
-PASS  its config comes from a RESOURCE, which is the file the dependency graph never opens  <-- pinned defect
+PASS  its config comes from a RESOURCE, because its /data is empty and the draft is where the id lives  <-- pinned defect
 ...
 PASS  an item too large to fetch is a problem too, so it is unread rather than clean  <-- pinned defect
 ...
@@ -188,6 +190,10 @@ PASS  and the json comes out with its keys in order, so two runs a week apart di
 ...
 PASS  with no blank line between rows: the defect DOUBLES the carriage return, it does not add a whole empty line, so that is the sequence asserted on  <-- pinned defect
 ...
+PASS  --username with a plain http:// portal url is refused before any request, because the password would travel in clear  <-- pinned defect
+...
+PASS  the token can come from WHOBREAKS_TOKEN, so a scheduled run keeps it off argv, and it is sent on every call  <-- pinned defect
+...
 PASS  the web map that loads the target only by its SERVICE URL is a hard break, over the wire  <-- pinned defect
 ...
 PASS  neither the target's service url nor the other url inside the web map was ever requested, although both point at this very server  <-- pinned defect
@@ -202,6 +208,8 @@ PASS  so a sweep that found nothing exits 2, not 0, and prints no token  <-- pin
 ...
 PASS  an edge whose class is a list, which is unhashable, is refused as a bad graph rather than a TypeError  <-- pinned defect
 ...
+PASS  an edge to an item that left the sweep is unknown and exits 2, not 0: the app still loads the map that was deleted  <-- pinned defect
+...
 PASS  --out and --graph that differ only in case are refused on every host, because Windows and a Mac both fold case and there the second write destroyed the first  <-- pinned defect
 PASS  and so they are where os.path.normcase keeps case, as it does on a Mac, whose default volume folds it  <-- pinned defect
 ...
@@ -210,10 +218,10 @@ PASS  a title the console cannot encode is printed with a ? for each character, 
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-530 assertions, 0 failed
+548 assertions, 0 failed
 ```
 
-The full run prints all 530 assertions. It prints the same 530 lines on Windows under Python
+The full run prints all 548 assertions. It prints the same 548 lines on Windows under Python
 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this block is
 cut.
 
@@ -240,83 +248,82 @@ end to end. That includes the graph files and the diff between two of them.
 
 ```
 export WHOBREAKS_PASSWORD='...'
-python whobreaks.py --url https://county.maps.arcgis.com --target a1b2c3d4e5f60718293a4b5c6d7e8f90 \
+python whobreaks.py --url https://yourorg.maps.arcgis.com --target a1b2c3d4e5f60718293a4b5c6d7e8f90 \
     --username gis_admin
 ```
 
+A scheduled run that already holds a token sets `WHOBREAKS_TOKEN` instead of passing `--token`,
+because other processes on the machine can read the command line.
+
+This is the self-test's own run against its first stand-in organization, on the loopback port
+that run happened to get, and on a console with the Windows code page:
+
 ```
-reading https://county.maps.arcgis.com
+$ python whobreaks.py --url http://127.0.0.1:62206 --target a1b2c3d4e5f60718293a4b5c6d7e8f90 --token ...
+reading http://127.0.0.1:62206
 target: a1b2c3d4e5f60718293a4b5c6d7e8f90
-query: orgid:7c41f0a9b2e84d6390af5b1c8e2d7043
-service url: services.arcgis.com/7c41f0a9b2e84d63/arcgis/rest/services/permits/featureserver
-  13 item(s) from (orgid:7c41f0a9b2e84d6390af5b1c8e2d7043) AND created:[0 TO 1789599598647]
-searching the configuration of 13 item(s)
-  MENTION ONLY cln0000000000000000000000000000c (Unrelated map)
-  HARD BREAK dsh00000000000000000000000000002 (Permit board)
-  HARD BREAK exb00000000000000000000000000001 (Permit finder)
-  SOFT BREAK map00000000000000000000000000005 (Permit viewer)
-  HARD BREAK nbk00000000000000000000000000004 (Nightly refresh)
-  HARD BREAK sec00000000000000000000000000008 (Secured viewer)
-  HARD BREAK sto00000000000000000000000000003 (How permits work)
-  MENTION ONLY txt00000000000000000000000000009 (Refresh script)
+query: orgid:REALORG
+service url: 127.0.0.1:62206/arcgis/rest/services/permits/featureserver
+  11 item(s) from (orgid:REALORG) AND created:[0 TO 1790550925170]
+searching the configuration of 11 item(s)
+  HARD BREAK 0b000000000000000000000000000000 (Nightly refresh)
+  HARD BREAK 5a000000000000000000000000000000 (How permits work)
+  MENTION ONLY 7e000000000000000000000000000000 (refresh.py)
+  SOFT BREAK ac000000000000000000000000000000 (Permit map)
+  HARD BREAK da000000000000000000000000000000 (Permit board ??)
+  MENTION ONLY dc000000000000000000000000000000 (Archive notes)
+  HARD BREAK eb000000000000000000000000000000 (Permit finder)
 
-8 item(s) reference a1b2c3d4e5f60718293a4b5c6d7e8f90
+7 item(s) reference a1b2c3d4e5f60718293a4b5c6d7e8f90
 
-HARD BREAK   dsh00000000000000000000000000002  Permit board [Dashboard]
-             data: widgets/datasets/dataSource/itemId (x1)
-             a1b2c3d4e5f60718293a4b5c6d7e8f90
-             data: widgets/itemId (x1)
-             a1b2c3d4e5f60718293a4b5c6d7e8f90
-HARD BREAK   exb00000000000000000000000000001  Permit finder [Web Experience]
-             resources/config.json: dataSources (x1)
-             dataSource_1-a1b2c3d4e5f60718293a4b5c6d7e8f90-0
-             resources/config.json: dataSources/dataSource_1-a1b2c3d4e5f60718293a4b5c6d7e8f90-0/itemId (x1)
-             a1b2c3d4e5f60718293a4b5c6d7e8f90
-             resources/config.json: widgets/widget_1/useDataSources/dataSourceId (x1)
-             dataSource_1-a1b2c3d4e5f60718293a4b5c6d7e8f90-0
-             resources/config.json: widgets/widget_1/config/initialMapDataSourceID (x1)
-             a1b2c3d4e5f60718293a4b5c6d7e8f90
-HARD BREAK   nbk00000000000000000000000000004  Nightly refresh [Notebook]
+HARD BREAK   0b000000000000000000000000000000  Nightly refresh [Notebook]
              data: cells/code/source (x1)
-             gis.content.get('a1b2c3d4e5f60718293a4b5c6d7e8f90')
+             lyr = gis.content.get('a1b2c3d4e5f60718293a4b5c6d7e8f90')
              data: cells/markdown/source (x1)
-             This replaced a1b2c3d4e5f60718293a4b5c6d7e8f90 in 2021.
-HARD BREAK   sec00000000000000000000000000008  Secured viewer [Web Map]
-             data: operationalLayers/url (x1)
-             ...ps://org.example/sharing/rest/content/items/a1b2c3d4e5f60718293a4b5c6d7e8f90/data?token=[redacted]&f=json
-HARD BREAK   sto00000000000000000000000000003  How permits work [StoryMap]
-             resources/draft_x.json: nodes/n-1/data/map/itemId (x1)
+             The source layer used to be a1b2c3d4e5f60718293a4b5c6d7e8f90.
+HARD BREAK   5a000000000000000000000000000000  How permits work [StoryMap]
+             resources/draft_x.json: nodes/n-x1/data/itemId (x1)
              a1b2c3d4e5f60718293a4b5c6d7e8f90
              resources/draft_x.json: resources/r-1/data/itemId (x1)
              a1b2c3d4e5f60718293a4b5c6d7e8f90
-SOFT BREAK   map00000000000000000000000000005  Permit viewer [Web Map]
-             data: operationalLayers/definitionExpression (x1)
-             SRC_ITEM = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
+HARD BREAK   da000000000000000000000000000000  Permit board ?? [Dashboard]
+             data: datasets/dataSource/itemId (x1)
+             a1b2c3d4e5f60718293a4b5c6d7e8f90
+HARD BREAK   eb000000000000000000000000000000  Permit finder [Web Experience]
+             resources/config.json: dataSources/dataSource_1/itemId (x1)
+             a1b2c3d4e5f60718293a4b5c6d7e8f90
+             resources/config.json: widgets/widget_1/useDataSources/dataSourceId (x1)
+             dataSource_1-a1b2c3d4e5f60718293a4b5c6d7e8f90-0
+SOFT BREAK   ac000000000000000000000000000000  Permit map [Web Map]
+             data: bookmarks/name (x1)
+             site a1b2c3d4e5f60718293a4b5c6d7e8f90
+             data: operationalLayers/layerDefinition/definitionExpression (x1)
+             SOURCE_ID = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
              data: operationalLayers/popupInfo/description (x1)
-             source item a1b2c3d4e5f60718293a4b5c6d7e8f90
-MENTION ONLY cln0000000000000000000000000000c  Unrelated map [Web Map]
-             metadata: description (x1)
-             Replaced a1b2c3d4e5f60718293a4b5c6d7e8f90 last year.
-MENTION ONLY txt00000000000000000000000000009  Refresh script [Code Sample]
+             joined to a1b2c3d4e5f60718293a4b5c6d7e8f90
+MENTION ONLY 7e000000000000000000000000000000  refresh.py [Code Attachment]
              data: (not json) (x1)
-             portal.content.get('a1b2c3d4e5f60718293a4b5c6d7e8f90') # not json at all
+             import arcgis lyr = gis.content.get('a1b2c3d4e5f60718293a4b5c6d7e8f90') # nightly refresh
+MENTION ONLY dc000000000000000000000000000000  Archive notes [Document Link]
+             metadata: description (x1)
+             superseded by a1b2c3d4e5f60718293a4b5c6d7e8f90, keep for audit
 
-5 hard, 1 soft, 2 mention only, over 12 item(s) searched
+4 hard, 1 soft, 2 mention only, over 10 item(s) searched
 
 2 item(s) COULD NOT BE READ, so they are not clean, they are unknown:
-  big0000000000000000000000000000b Parcel delivery: 67108864 byte item was not fetched, over the 33554432 byte limit, so its configuration was never searched
-  prv0000000000000000000000000000a Locked report: data: 403 You do not have permissions to access this resource or perform this operation.; resources: https://county.maps.arcgis.com/sharing/rest/content/items/prv0000000000000000000000000000a/resources: 403 You do not have permissions to access this resource or perform this operation.
+  b1000000000000000000000000000000 Parcel delivery: 33554433 byte item was not fetched, over the 33554432 byte limit, so its configuration was never searched
+  de000000000000000000000000000000 Locked report: data: http://127.0.0.1:62206/sharing/rest/content/items/de000000000000000000000000000000/data: HTTP Error 500: Internal Server Error
 
 Do not read this run as permission to delete. It searched what it could read.
 ```
 
-Thirteen items, twelve searched, eight of them holding the id somewhere. Two more items hold it
-and are not in that list. One is a copy of the Permit finder that carries only the target's
-thumbnail url, and a thumbnail is a picture of an item, not a use of it. The other names a
-longer id that happens to contain these thirty-two characters, which is a different item.
+Eleven items, ten searched, seven of them referencing the target. The dashboard's title holds two
+characters that the code page cannot show, so they print as `?`. One more item holds the id and is
+not in the list. It is a cloned viewer that carries only the target's thumbnail url, and a
+thumbnail is a picture of an item, not a use of it.
 
 The run exits 2 rather than 1, because two items could not be read. One is too large to fetch
-and one refused the token, and an item nobody read is not an item known to be clean.
+and one answered HTTP 500, and an item nobody read is not an item known to be clean.
 
 ## Following the break further
 
@@ -324,13 +331,13 @@ and one refused the token, and an item nobody read is not an item known to be cl
 second stand-in organization, on the loopback port that run happened to get:
 
 ```
-$ python whobreaks.py --url http://127.0.0.1:53901/wide --target a1b2c3d4e5f60718293a4b5c6d7e8f90 \
+$ python whobreaks.py --url http://127.0.0.1:62206/wide --target a1b2c3d4e5f60718293a4b5c6d7e8f90 \
     --token ... --depth 3
-reading http://127.0.0.1:53901/wide
+reading http://127.0.0.1:62206/wide
 target: a1b2c3d4e5f60718293a4b5c6d7e8f90
 query: orgid:REALORG
-service url: 127.0.0.1:53901/arcgis/rest/services/permits/featureserver
-  8 item(s) from (orgid:REALORG) AND created:[0 TO 1790459090151]
+service url: 127.0.0.1:62206/arcgis/rest/services/permits/featureserver
+  8 item(s) from (orgid:REALORG) AND created:[0 TO 1790550924637]
 searching the configuration of 8 item(s)
   HARD BREAK f1000000000000000000000000000000 (Permit layers)
   MENTION ONLY f5000000000000000000000000000000 (Permit handbook)
@@ -340,7 +347,7 @@ searching the configuration of 8 item(s)
 
 HARD BREAK   f1000000000000000000000000000000  Permit layers [Web Map]
              data: operationalLayers/url (x1)
-             http://127.0.0.1:53901/arcgis/rest/services/Permits/FeatureServer/0
+             http://127.0.0.1:62206/arcgis/rest/services/Permits/FeatureServer/0
 SOFT BREAK   f7000000000000000000000000000000  Permit filter board [Dashboard]
              data: datasets/filter (x1)
              PERMIT_SRC = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
@@ -376,11 +383,12 @@ so. Without `--depth` the report is the one above, line for line, with no hop se
 
 `--apply --graph week2.json` writes every edge of the sweep, with the flags that say how far to
 trust it. `--compare` prints what changed since an earlier graph. With one file, it compares
-that file with the sweep it runs. With two files, it runs offline and makes no request at all:
+that file with the sweep it runs. With two files, it runs offline and makes no request at all.
+This is the self-test's run over two graphs of its second organization:
 
 ```
-$ python whobreaks.py --compare week1.json week2.json
-compared with the graph taken last week
+$ python whobreaks.py --compare week0.json graphs/week1.json
+compared with the graph taken 2026-09-20T14:00:00Z
 + HARD BREAK   f3000000000000000000000000000000 -> f2000000000000000000000000000000
 - HARD BREAK   f4000000000000000000000000000000 -> f2000000000000000000000000000000
 1 edge(s) added, 1 removed, 0 unknown
@@ -398,11 +406,11 @@ itself left the sweep takes its own edges with it, and those print as removed.
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--url` | none | Portal url. Required. Must start with `https://` or `http://`. |
+| `--url` | none | Portal url. Required. Must start with `https://` or `http://`, and must carry no user name, password, query string or fragment. |
 | `--target` | none | The item id you are about to delete. Required, and 32 hexadecimal characters. |
 | `--query` | the signed-in org | Search query to sweep. The created-date slices are ANDed onto it. |
-| `--token` | none | An existing portal token. |
-| `--username` | none | Sign in as this user. The password comes from `WHOBREAKS_PASSWORD` or an unechoed prompt. |
+| `--token` | none | An existing portal token. Other processes can read it on the command line, so a scheduled run sets `WHOBREAKS_TOKEN` instead. |
+| `--username` | none | Sign in as this user. The password comes from `WHOBREAKS_PASSWORD` or an unechoed prompt. Refused with an `http://` url, except on this machine's loopback address. |
 | `--out` | none | File to write the report to. |
 | `--format` | `json` | `json` or `csv`. |
 | `--num` | `100` | Rows per search page to ask for. Clamped to 100, which is all the server gives. |
@@ -416,7 +424,9 @@ itself left the sweep takes its own edges with it, and those print as removed.
 
 `--apply` writes local files only. It does not change the organization, and there is no flag
 that does. The password is never a flag either: `argv` is readable by every process on the
-machine, and the self-test asserts that no `--password` attribute exists at all.
+machine, and the self-test asserts that no `--password` attribute exists at all. A password is
+never posted over plain `http://` either. The one exception is the loopback address, which the
+self-test uses.
 
 ## What it checks (or refuses)
 
@@ -436,7 +446,9 @@ is not found inside `.../FeatureServer/12`, and `maps.example.org` is not found 
 `rest/services` root is not searched for, because it would match every service under it. A viewer
 url whose query string opens another item, such as `index.html?webmap=<id>`, is not searched for,
 because without its query it matches every link through that viewer. A url that carries the
-target id anywhere, including in its query string, is not searched for either. The id search already finds it, and an app's url without its
+target id anywhere, including in its query string, is not searched for either.
+A service url that is percent-encoded inside another url, as in a Map Viewer link
+`index.html?url=https%3A%2F%2F...`, is found too. The id search already finds it, and an app's url without its
 `?id=` is every app of the same template in the organization.
 
 `/content/items/{id}/resources` is listed to its last page. A StoryMap can list sixty photographs
@@ -488,6 +500,8 @@ It refuses, or reports as unknown, rather than guessing:
   traceback, which exits 1, and 1 reads as "something references it".
 - **A target item that could not be read is a gap, not a pass.** Its url is then unknown, so no
   item was searched for it. The run says so and cannot exit 0.
+- **A credential in `--url` is refused.** A `user:password@` or a `?token=` in the portal url was
+  printed on the first line of the run and written into both files.
 - **A url found inside an item is never opened.** If this tool resolved one, an item author
   could choose a server that the operator's token is sent to.
 - **A break travels along hard references only.** Soft and mention edges are recorded and
@@ -501,12 +515,14 @@ It refuses, or reports as unknown, rather than guessing:
 |---|---|
 | 0 | nothing in the organization references the target, and every item was enumerated and read |
 | 1 | something references it, listed worst first |
-| 2 | the sweep could not be completed, so nothing can be concluded. An item was unreadable or read in part, the target item itself was unreadable, a search slice sat on the 10,000 ceiling, or a search page held a result with no usable id. Also when `--apply` could not write a file it was asked for |
-| 64 | usage error, including a graph file that is missing, is not a graph, or covers a different scope, and an `--out` or `--graph` that is a folder |
+| 2 | the sweep could not be completed, so nothing can be concluded. An item was unreadable or read in part, the target item itself was unreadable, a search slice sat on the 10,000 ceiling, or a search page held a result with no usable id. Also when `--apply` could not write a file it was asked for, and when the tool met a failure it did not foresee |
+| 64 | usage error, including a flag that is unknown or has a bad value, a graph file that is missing, is not a graph, or covers a different scope, and an `--out` or `--graph` that is a folder |
 
 `--depth` and a one-file `--compare` do not change the exit code of the sweep. A two-file
 `--compare` exits 0 when no edge changed and 1 when an edge did. It exits 2 when either graph is
-incomplete, whatever the diff says, because an edge missing from that graph is not proof.
+incomplete, whatever the diff says, because an edge missing from that graph is not proof. It also
+exits 2 when an edge is unknown. That is what a deleted map leaves behind in the app that still
+loads it.
 
 Exit 2 beats exit 1 on purpose. Somebody who sees 1 goes and looks at the items. Somebody who
 sees 0 deletes the item, so 0 has to mean the sweep was complete, not that it finished.
@@ -522,7 +538,7 @@ Excerpts are scrubbed on the way out. A secured feature service url inside a web
 token in its query string, and that excerpt is the most useful line in the report, so it is
 written with the token replaced rather than dropped. The text is scrubbed before the excerpt is
 cut from it, so a token whose key is outside the excerpt is still replaced. `access_token=` is
-replaced as well as `token=`, and so is a value written as `token="..."`, `password = '...'` or
+replaced as well as `token=`, and so are `client_secret=`, `secret=` and an Azure `sig=`, and so is a value written as `token="..."`, `password = '...'` or
 `"token": "..."`. The self-test asserts that no credential reaches stdout or either file.
 
 The console replaces every control character in a line with `?`. That includes the title, the
@@ -562,8 +578,21 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   on Windows stops before 1,500 levels, 3.12 and 3.13 on Windows parse 1,500 and stop before
   5,000, and 3.12 on Linux parses 5,000. An item between those depths is unread on one host and
   read on another. The self-test uses 100,000 levels, which no host parses.
-- Only a secret that follows its key name is scrubbed. A password passed as a bare positional
-  argument, as in `GIS(url, "admin", "...")`, is not recognised and is printed in the excerpt.
+- Only a secret that follows a key name this tool knows is scrubbed: `token`, `password`,
+  `apikey`, `api_key`, `code_verifier`, `signature`, `secret` and `sig`, with any prefix such as
+  `access_`. A password passed as a bare positional argument, as in `GIS(url, "admin", "...")`,
+  is not recognised and is printed in the excerpt.
+- A string with no separator in it that holds the target id thousands of times, such as ids
+  joined by dashes, is slow to search. Each match reads the whole string again, so 2,000
+  matches in one string took about ten seconds.
+- A portal that returns item ids in upper case is not supported. ArcGIS Online and Enterprise
+  return lower case, and an upper-case copy of the target is searched as if it were another item.
+- `--out` and `--graph` are compared by name, without regard to case. Two names for one file,
+  such as a hard link, a symbolic link or an NTFS stream name like `r.json::$DATA`, are not
+  detected, and the second write replaces the first.
+- A graph file is trusted to be one this tool wrote. The file is checked for its shape and
+  types, but a hand-edited file that says `"complete": true` next to a list of unread items is
+  read as complete.
 - It cannot see a reference that is neither the item id nor the target's own url. That includes
   a url through another host name, a proxy or an explicit port, a view layer's url, a layer
   named by title in a script, and an id assembled at run time from parts.

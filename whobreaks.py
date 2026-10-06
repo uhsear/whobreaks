@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Report every item that references the one you are about to delete, including the Experience Builder drafts the dependency graph never opens.
+"""Report every item that references the one you are about to delete, found by reading the configuration of every item in the organization.
 
 A delete in an ArcGIS organization is not reversible and the portal asks for no
 more than a confirmation. This tool reads the CONFIGURATION of every item in
@@ -8,16 +8,14 @@ into a hard break (a data source or a layer reference), a soft break (a filter,
 a bookmark, a popup reference) and a mention in free text. It is read-only:
 there is no flag that deletes, moves or edits anything.
 
-arcgis.apps.itemgraph is the obvious tool and it does more than people expect.
-create_dependency_graph accepts include_reverse, ItemNode.contained_by() and
-ItemNode.required_by() both exist, and that traversal is far less code than
-this. It is built on item.related_items(direction="reverse"), which returns the
-relationships the PORTAL HAS REGISTERED. It never opens
-/content/items/{id}/data or /content/items/{id}/resources. An item id that
-lives only inside an Experience Builder widget config, a dashboard dataset
-binding, a StoryMap draft resource or a notebook string literal is invisible to
-it in both directions, because no relationship was ever registered for it. That
-gap is the whole tool.
+arcgis.apps.itemgraph is the obvious tool, and it does a lot. It reads /data
+and the known draft resources of web maps, dashboards, Experience Builder apps,
+StoryMaps and Hub sites, and ItemNode.required_by() walks the graph in reverse.
+It parses the item types it knows, by their known keys, and it resolves a layer
+url by requesting it. This tool reads every item of any type, every JSON
+resource, notebooks and text bodies, and matches the id as a whole token. It
+sorts each hit into a class, leaves thumbnails out, and never opens a url it
+finds inside an item.
 
     python whobreaks.py --self-test
     python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --username gis_admin
@@ -105,6 +103,15 @@ REDACTED = "[redacted]"
 # and in scheduler logs, and urllib quotes a failing url back into its error.
 SECRET_ENV = "WHOBREAKS_PASSWORD"
 
+# Environment variable an existing token is read from. A token is a bearer
+# credential for its lifetime, so it has the same reasons to stay off argv.
+# --token still works for a one-off run at a prompt.
+TOKEN_ENV = "WHOBREAKS_TOKEN"
+
+# Hosts a password may be posted to over plain http: the self-test's stand-in
+# portal. Anywhere else, http would put the password on the wire in clear.
+LOOPBACK = frozenset(("127.0.0.1", "localhost", "::1"))
+
 # =============================================================================
 # End of CONFIGURATION.
 # =============================================================================
@@ -190,10 +197,11 @@ URL_RIGHT = ALNUM | frozenset("-_")
 # underscore: \b does not, and access_token= went out in clear. The value may
 # follow a colon or spaces and may be quoted, because a notebook writes
 # token="..." and a JSON body writes "token": "...", and both went out in
-# clear when only key=value was recognised.
+# clear when only key=value was recognised. secret covers client_secret, and
+# sig is the key of an Azure shared access signature: both went out in clear.
 SECRET_RE = re.compile(
     r"(?i)(?<![a-z0-9])(token|password|apikey|api_key|code_verifier|"
-    r"signature)([\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|"
+    r"signature|secret|sig)([\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|"
     r"[^&\s\"'<>,;(){}\[\]]+)")
 
 # Characters that move a terminal's cursor or change what it shows. An item
@@ -498,18 +506,25 @@ def scan_text(target, text, path, source, url=None):
     on it is classified by the same path rules as a match on the id: the url
     under a layer loads the service, the url in a description mentions it.
     """
-    positions = id_positions(text, target)
-    if url:
-        positions = sorted(set(positions) | set(url_positions(text, url)))
+    found = [(text, pos) for pos in id_positions(text, target)]
+    urls = url_positions(text, url) if url else []
+    if url and not urls and "%" in text:
+        # A viewer link carries the service url percent-encoded, as in
+        # mapviewer/index.html?url=https%3A%2F%2F... That link was the only
+        # reference in an app, and the run exited 0. Decoded only when the
+        # plain text has no match, so one url is never counted twice.
+        decoded = urllib.parse.unquote(text)
+        found.extend((decoded, pos) for pos in url_positions(decoded, url))
+    found.extend((text, pos) for pos in urls if (text, pos) not in found)
     out = []
-    for pos in positions:
-        kind = classify(path, token_at(text, pos))
+    for body, pos in sorted(found, key=lambda one: one[1]):
+        kind = classify(path, token_at(body, pos))
         if kind is None:
             # A thumbnail url: a picture of the target, not a use of it.
             # Deleting the target loses the image and nothing else.
             continue
         out.append({"kind": kind, "source": source, "path": path_label(path),
-                    "count": 1, "excerpt": excerpt(text, pos)})
+                    "count": 1, "excerpt": excerpt(body, pos)})
     return out
 
 
@@ -942,6 +957,10 @@ def impact(edges, target, depth):
     reached = {}
     frontier = [target]
     for hop in range(1, depth + 1):
+        if not frontier:
+            # Nothing left to follow. Without this a --depth typed large to
+            # mean "all of it" spun for hours after the sweep had finished.
+            break
         found = []
         for node in frontier:
             for src in sorted(loaders.get(node, ())):
@@ -1116,9 +1135,16 @@ def build_graph(url, query, target, taken, report, service_url=None):
 def load_graph(path):
     """Read a graph file this tool wrote, or raise ValueError saying why not."""
     with io.open(path, encoding="utf-8") as handle:
-        body = json.load(handle)
+        try:
+            body = json.load(handle)
+        except RecursionError:
+            # Not a ValueError, so it escaped as a traceback's exit 1, which
+            # a two-file --compare documents as "an edge changed".
+            raise ValueError("%s is nested too deep to be a graph file" % path)
     if (not isinstance(body, dict) or body.get("whobreaks_graph") != 1
-            or not isinstance(body.get("edges"), list)):
+            or not isinstance(body.get("edges"), list)
+            or not isinstance(body.get("target"), str)
+            or not isinstance(body.get("complete"), bool)):
         raise ValueError("%s is not a whobreaks graph file. Write one with "
                          "--apply --graph." % path)
     for edge in body["edges"]:
@@ -1396,7 +1422,7 @@ def portal_reader(url, token, insecure=False, max_size=MAX_ITEM_SIZE,
                   max_resources=MAX_RESOURCES, max_body=MAX_BODY_BYTES):
     """Build the reader inspect() drives: (item id, size) -> (payloads, problem).
 
-    Two endpoints per item, because the dependency graph reads neither.
+    Two endpoints per item, whatever its type.
     /data holds the web map, the dashboard and the notebook. /resources holds
     the Experience Builder draft and the StoryMap draft, which is where an id
     hides while the published app still points somewhere else.
@@ -2053,6 +2079,12 @@ def self_test():
           % REDACTED,
           "access_token is a token too, although an underscore is a word "
           "character and \\b never matched after it  <-- pinned defect")
+    check("AZURESAS" not in scrub("https://acct.blob.core.windows.net/c/x?"
+                                  "sv=1&sig=AZURESAS"),
+          "the sig of an Azure shared access signature is replaced  "
+          "<-- pinned defect")
+    check("CLIENTSECRET" not in scrub("client_secret = 'CLIENTSECRET'"),
+          "and so is a client_secret in a notebook  <-- pinned defect")
     check(scrub("mytoken=abc") == "mytoken=abc",
           "and a key that merely ends in token after a letter is left alone")
     for form in ('token="S3CR3T"', "token='S3CR3T'", 'password = "S3CR3T"',
@@ -2207,6 +2239,19 @@ def self_test():
           "occurrence is not counted twice  <-- pinned defect")
     LAYER1 = url_needle("https://maps.example.org/arcgis/rest/services/"
                         "Permits/FeatureServer/1")[0]
+    encoded = ("https://www.arcgis.com/apps/mapviewer/index.html?url="
+               + urllib.parse.quote("https://maps.example.org/arcgis/rest/"
+                                    "services/Permits/FeatureServer/1",
+                                    safe=""))
+    check([hit["kind"] for hit in scan_text(TARGET, encoded, ("url",), "data",
+                                           LAYER1)] == [HARD],
+          "a viewer link that carries the service url percent-encoded is a "
+          "hard break, not a clean run  <-- pinned defect")
+    check([hit["count"] for hit in scan_payload(
+              TARGET, {"url": "https://maps.example.org/arcgis/rest/services/"
+                              "Permits/FeatureServer/1?x=%20"}, "data",
+              LAYER1)] == [1],
+          "and a plain url with a % in its query is counted once, not twice")
     check(url_positions("https://maps.example.org/arcgis/rest/services/Permits/"
                         "FeatureServer/1", LAYER1) == [8],
           "the target url matches itself")
@@ -2572,6 +2617,12 @@ def self_test():
           "depth 2 counts the one item that loads a hop 2 item, so a short "
           "depth says it was short  <-- pinned defect")
     raises(lambda: impact(E, TARGET, 0), "a depth of zero raises")
+    started = time.time()
+    check(impact(E, TARGET, 10 ** 8)[0] == impact(E, TARGET, 5)[0]
+          and time.time() - started < 5,
+          "a --depth typed large to mean all of it stops when nothing is left "
+          "to follow, instead of spinning for minutes after the sweep  "
+          "<-- pinned defect")
     A1, A2, X1 = "a1" + "0" * 30, "a2" + "0" * 30, "e1" + "0" * 30
     check(impact([edge(A2, TARGET, HARD), edge(A1, TARGET, HARD),
                   edge(X1, A2, HARD), edge(X1, A1, HARD)], TARGET, 2)[0][X1]
@@ -3177,7 +3228,8 @@ def self_test():
             # the target item itself, as a portal does to an anonymous caller
             # when the target is not public.
             variant = ""
-            for prefix in ("/blind", "/wide", "/noinfo", "/badid"):
+            for prefix in ("/blind", "/wide", "/noinfo", "/badid",
+                           "/badtotal"):
                 if path.startswith(prefix + "/"):
                     variant, path = prefix, path[len(prefix):]
             blind = variant == "/blind"
@@ -3207,6 +3259,10 @@ def self_test():
                 # hand-rolled portal sends it.
                 return self._json({"total": 1, "nextStart": -1,
                                    "results": [{"id": 12345}]})
+            if route == "search" and variant == "/badtotal":
+                # A total that is not a number, which int() raises TypeError
+                # on: the kind of failure nothing in this tool foresaw.
+                return self._json({"total": [1], "results": []})
             if route == "search":
                 return self._search(params, WIDE if variant == "/wide"
                                     else CATALOG)
@@ -3406,8 +3462,8 @@ def self_test():
         check(problem is None, "the Experience Builder item reads cleanly")
         check([source for source, _body in payloads]
               == ["resources/config.json"],
-              "its config comes from a RESOURCE, which is the file the "
-              "dependency graph never opens  <-- pinned defect")
+              "its config comes from a RESOURCE, because its /data is empty "
+              "and the draft is where the id lives  <-- pinned defect")
         check(payloads[0][1]["dataSources"]["dataSource_1"]["itemId"] == TARGET,
               "and it really is the widget config, parsed")
         payloads, problem = read(STORY_ID, 20)
@@ -3698,6 +3754,53 @@ def self_test():
               "and a message, not on a traceback's exit 1, which reads as "
               "\"something references it\"  <-- pinned defect")
         code, seen = captured(lambda: main(
+            ["--url", LIVE + "/badtotal", "--target", TARGET, "--query",
+             "q"]))
+        check(code == 2 and "unexpected TypeError" in seen
+              and "Traceback" not in seen,
+              "a failure nothing foresaw ends the run on exit 2, not on a "
+              "traceback's exit 1, which reads as \"something references "
+              "it\"  <-- pinned defect")
+        before = len(server.seen)
+        for bad_url in ("http://admin:URLPASS@127.0.0.1:%d"
+                        % server.server_address[1],
+                        LIVE + "/?token=URLTOKEN", "admin:URLPASS@portal"):
+            code, seen = captured(lambda: main(
+                ["--url", bad_url, "--target", TARGET, "--query", "q"]))
+            check(code == 64 and "URLPASS" not in seen
+                  and "URLTOKEN" not in seen,
+                  "a --url carrying %s is refused, and not printed  "
+                  "<-- pinned defect" % ("a query string" if "?" in bad_url
+                                        else "user:password@"))
+        # The password is set so that a regression posts it to a closed port
+        # and fails, rather than waiting at the prompt for ever.
+        os.environ[SECRET_ENV] = PASSWORD
+        try:
+            code, seen = captured(lambda: main(
+                ["--url", "http://127.0.0.2:9", "--target", TARGET,
+                 "--username", "u"]))
+        finally:
+            del os.environ[SECRET_ENV]
+        check(code == 64 and "in clear" in seen
+              and len(server.seen) == before,
+              "--username with a plain http:// portal url is refused before "
+              "any request, because the password would travel in clear  "
+              "<-- pinned defect")
+        os.environ[TOKEN_ENV] = LIVE_TOKEN
+        try:
+            before = len(server.seen)
+            code, seen = captured(lambda: main(
+                ["--url", LIVE, "--target", TARGET, "--query",
+                 "type:Dashboard"]))
+        finally:
+            del os.environ[TOKEN_ENV]
+        check(code == 1 and all("token=%s" % LIVE_TOKEN in path
+                                for path in server.seen[before:])
+              and LIVE_TOKEN not in seen,
+              "the token can come from %s, so a scheduled run keeps it off "
+              "argv, and it is sent on every call  <-- pinned defect"
+              % TOKEN_ENV)
+        code, seen = captured(lambda: main(
             ["--url", LIVE + "/blind", "--target", TARGET]))
         check(code == 2 and "could not read the org id" in seen,
               "a portal that will not name its org asks for --query rather "
@@ -3788,7 +3891,7 @@ def self_test():
         check(LIVE_TOKEN not in graph_text,
               "no credential reaches the graph file  <-- pinned defect")
 
-        previous = dict(wide_graph, taken="last week")
+        previous = dict(wide_graph, taken="2026-09-20T14:00:00Z")
         previous["edges"] = [one for one in wide_graph["edges"]
                              if one["from"] != W_SITE] + [
             {"from": W_NOTE, "to": W_APP, "kind": HARD}]
@@ -3797,7 +3900,7 @@ def self_test():
         code, seen = captured(lambda: main(
             ["--url", WIDE_URL, "--target", TARGET, "--token", LIVE_TOKEN,
              "--compare", graph_zero]))
-        check("compared with the graph taken last week" in seen
+        check("compared with the graph taken 2026-09-20T14:00:00Z" in seen
               and "+ HARD BREAK   %s -> %s" % (W_SITE, W_APP) in seen
               and "- HARD BREAK   %s -> %s" % (W_NOTE, W_APP) in seen
               and "1 edge(s) added, 1 removed, 0 unknown" in seen,
@@ -3928,9 +4031,27 @@ def self_test():
                 ("and so is a file with edges but without the mark this tool "
                  "writes", dict((key, value) for key, value
                                 in wide_graph.items()
-                                if key != "whobreaks_graph"))):
+                                if key != "whobreaks_graph")),
+                ("a graph with no target is refused, not a KeyError in the "
+                 "diff  <-- pinned defect",
+                 dict((key, value) for key, value in wide_graph.items()
+                      if key != "target")),
+                ("and so is one whose target is a list  <-- pinned defect",
+                 dict(wide_graph, target=[TARGET])),
+                ("and one whose complete flag is the string \"false\", which "
+                 "is true  <-- pinned defect",
+                 dict(wide_graph, complete="false"))):
             write_json(broken, bad_edge)
             raises(lambda: load_graph(bad_edge), label)
+        with io.open(bad_edge, "w", encoding="utf-8") as handle:
+            handle.write(u"[" * 200000 + u"]" * 200000)
+        raises(lambda: load_graph(bad_edge),
+               "a graph file nested too deep to parse is refused, not a "
+               "RecursionError  <-- pinned defect")
+        code, seen = captured(lambda: main(["--compare", bad_edge, graph_one]))
+        check(code == 64 and "nested too deep" in seen,
+              "and --compare makes it a usage error, not a traceback's exit 1")
+        write_json(dict(wide_graph, target=[TARGET]), bad_edge)
         code, seen = captured(lambda: main(["--compare", bad_edge, graph_one]))
         check(code == 64 and "not a whobreaks graph" in seen,
               "--compare turns a refused graph into a usage error, not a "
@@ -3950,6 +4071,15 @@ def self_test():
               "--compare exits 1 when an edge was only removed")
         check(compared(wide_graph, extra_edge)[0] == 1,
               "and when an edge was only added")
+        GONE = "9b" + "0" * 30
+        with_gone = dict(wide_graph, items=wide_graph["items"] + [GONE],
+                         edges=wide_graph["edges"] + [
+                             {"from": W_APP, "to": GONE, "kind": HARD}])
+        code, seen = compared(with_gone, wide_graph)
+        check(code == 2 and "0 edge(s) added, 0 removed, 1 unknown" in seen,
+              "an edge to an item that left the sweep is unknown and exits 2, "
+              "not 0: the app still loads the map that was deleted  "
+              "<-- pinned defect")
         half = dict(wide_graph, complete=False)
         code, seen = compared(half, wide_graph)
         check(code == 2 and "previous graph is NOT complete" in seen,
@@ -4068,6 +4198,17 @@ def self_test():
             "a format nothing can write is refused by argparse")
     refuses(["--url", PORTAL, "--num", "lots"], "a non-numeric --num is refused")
     refuses(["--target"], "a --target with no value is refused")
+    noise, sys.stderr = sys.stderr, io.StringIO()
+    try:
+        _parse(["--url", PORTAL, "--depth", "two"])
+        typo = None
+    except SystemExit as exc:
+        typo = exc.code
+    finally:
+        sys.stderr = noise
+    check(typo == 64,
+          "a mistyped flag exits 64, usage error, and not argparse's 2, which "
+          "reads as a sweep that could not be completed  <-- pinned defect")
     check("password" not in _parse(["--url", PORTAL]).__dict__,
           "there is no --password attribute at all, because argv is readable "
           "by every process on the box  <-- pinned defect")
@@ -4162,7 +4303,10 @@ def _parse(argv):
     ap.add_argument("--query",
                     help="search query to sweep (default: orgid of the "
                          "signed-in org)")
-    ap.add_argument("--token", help="an existing portal token")
+    ap.add_argument("--token",
+                    help="an existing portal token. Other processes can read "
+                         "argv, so a scheduled run sets %s instead."
+                         % TOKEN_ENV)
     ap.add_argument("--username",
                     help="generate a token for this user. The password comes "
                          "from %s or an unechoed prompt, never from argv."
@@ -4198,7 +4342,14 @@ def _parse(argv):
                          "and prints, and nothing is written.")
     ap.add_argument("--self-test", dest="self_test", action="store_true",
                     help="run the offline assertions and exit")
-    return ap.parse_args(argv)
+    try:
+        return ap.parse_args(argv)
+    except SystemExit as exc:
+        # argparse exits 2 on a bad flag, and 2 is documented as "the sweep
+        # could not be completed". A typo is a usage error, 64.
+        if exc.code == 2:
+            raise SystemExit(64)
+        raise
 
 
 def _authenticate(args):
@@ -4206,7 +4357,7 @@ def _authenticate(args):
     if args.token:
         return args.token
     if not args.username:
-        return None
+        return os.environ.get(TOKEN_ENV) or None
     secret = read_secret(args.username)
     return generate_token(args.url, args.username, secret, args.insecure)
 
@@ -4216,7 +4367,18 @@ def main(argv=None):
 
     if args.self_test:
         return self_test()
+    try:
+        return _run(args)
+    except Exception as exc:
+        # A traceback exits 1, and 1 means "something references the target"
+        # or "an edge changed". Whatever this tool did not foresee, it could
+        # not tell, and that is exit 2.
+        complain("unexpected %s: %s" % (type(exc).__name__, scrub(exc)))
+        return 2
 
+
+def _run(args):
+    """Everything main() does after the self-test, as an exit code."""
     if args.compare and len(args.compare) > 2:
         print("error: --compare takes one graph file, or two to compare "
               "offline.", file=sys.stderr)
@@ -4234,9 +4396,24 @@ def main(argv=None):
               "without a portal.", file=sys.stderr)
         return 64
     if not is_http_url(args.url):
-        print("error: --url must start with https:// or http://, got %r. "
-              "urllib quotes a url it cannot open back into its own error, "
-              "and that url carries the token." % args.url, file=sys.stderr)
+        # The url is not echoed: admin:password@host is a url too.
+        print("error: --url must start with https:// or http://. urllib "
+              "quotes a url it cannot open back into its own error, and that "
+              "url carries the token.", file=sys.stderr)
+        return 64
+    try:
+        parts = urllib.parse.urlsplit(args.url)
+        loopback = parts.hostname in LOOPBACK
+        extra_parts = (parts.username is not None or parts.password is not None
+                       or parts.query or parts.fragment)
+    except ValueError:
+        loopback, extra_parts = False, True
+    if extra_parts:
+        # A user:password@ or a ?token= in --url was printed on the first
+        # line of the run and written into both files.
+        print("error: --url must be the portal url alone, with no user name, "
+              "password, query string or fragment. Pass credentials with "
+              "--username or %s." % TOKEN_ENV, file=sys.stderr)
         return 64
     if not args.target:
         print("error: --target is required: the item id you are about to "
@@ -4271,6 +4448,12 @@ def main(argv=None):
     if args.insecure and args.username:
         print("error: --insecure with --username would post your password "
               "down an unverified connection. Pass --token instead.",
+              file=sys.stderr)
+        return 64
+    if (args.username and not args.url.lower().startswith("https://")
+            and not loopback):
+        print("error: --username with an http:// --url would post your "
+              "password in clear. Use the https:// url of the portal.",
               file=sys.stderr)
         return 64
     if args.num < 1:
@@ -4381,7 +4564,9 @@ def compare_files(old_path, new_path):
 
     Exits 0 when no edge changed, 1 when one did, and 2 when either graph is
     incomplete, whatever the diff says: an edge missing from a sweep that could
-    not read everything is not proof that the reference is gone.
+    not read everything is not proof that the reference is gone. An unknown
+    edge is exit 2 as well. It is what a deleted map leaves behind in the app
+    that still loads it, and exit 0 read as "nothing changed".
     """
     try:
         old = load_graph(old_path)
@@ -4400,7 +4585,7 @@ def compare_files(old_path, new_path):
     encoding = getattr(sys.stdout, "encoding", None)
     for line in describe_diff(old, new, added, removed, unknown):
         print(printable(line, encoding))
-    if not (old.get("complete") and new.get("complete")):
+    if not (old.get("complete") and new.get("complete")) or unknown:
         return 2
     return 1 if (added or removed) else 0
 
