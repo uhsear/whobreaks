@@ -627,3 +627,4 @@ Other single-file tools in this portfolio that pair with this one:
 - [sightline](https://github.com/uhsear/sightline) - what a viewer can see among the items that survive
 - [agol-relink](https://github.com/uhsear/agol-relink) - repoint the references this finds, instead of deleting
 - [stalehost](https://github.com/uhsear/stalehost) - the whole-token rule that the service url match follows, applied to a retired host name on disk
+- [deadwidget](https://github.com/uhsear/deadwidget) - the finer grain inside one Experience Builder app: widgets bound to a layer or sublayer id that no longer exists
