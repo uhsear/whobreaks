@@ -4217,6 +4217,9 @@ def self_test():
     refuses(["--url", PORTAL, "--delete"],
             "there is no --delete flag either, this tool only reads  "
             "<-- pinned defect")
+    refuses(["--url", PORTAL, "--target", TARGET, "--ap"],
+            "a unique prefix of --apply is refused, because abbreviations would "
+            "turn a typo into a write  <-- pinned defect")
 
     # ---- the harness itself, which has to be able to report red
     #
@@ -4295,6 +4298,7 @@ def _parse(argv):
         epilog="Read-only. No flag deletes, moves or edits anything. The "
                "password is never a flag: export %s or answer the prompt."
                % SECRET_ENV,
+        allow_abbrev=False,
     )
     ap.add_argument("--url",
                     help="portal url, e.g. https://county.maps.arcgis.com")

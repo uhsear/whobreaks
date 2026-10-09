@@ -216,14 +216,15 @@ PASS  and so they are where os.path.normcase keeps case, as it does on a Mac, wh
 PASS  a file that cannot be written ends the run on exit 2 and a message, not on a traceback's exit 1, which reads as "something references it"  <-- pinned defect
 PASS  a title the console cannot encode is printed with a ? for each character, and the sweep still exits 1, because UnicodeEncodeError is a ValueError and used to make it exit 2  <-- pinned defect
 ...
+PASS  a unique prefix of --apply is refused, because abbreviations would turn a typo into a write  <-- pinned defect
+...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-548 assertions, 0 failed
+549 assertions, 0 failed
 ```
 
-The full run prints all 548 assertions. It prints the same 548 lines on Windows under Python
-3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this block is
-cut.
+The full run prints all 549 assertions. It printed the same 549 lines on Windows under Python
+3.13. The `...` lines above are where this block is cut.
 
 ## Requirements
 
