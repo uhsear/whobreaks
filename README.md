@@ -26,6 +26,10 @@ break three hops out without one more portal call. It follows hard breaks only. 
 filters on the target still draws, and a story that names an item in a paragraph breaks
 nothing, so neither passes a break on to whatever loads it.
 
+A graph in a file that nobody opens is not watched, and a break arrives one week at a time.
+`--dashboard` turns the graph into one static page, and `--compare` puts what changed since the
+earlier sweep on it. A scheduled sweep that replaces the file keeps a page on a screen current.
+
 A reference by service url is the other half. A dependency tool can resolve a url that it
 finds inside an item by requesting that url with the admin session. Then any item author can
 make the admin token call a server of their choosing. This tool reads the target item's own
@@ -214,22 +218,46 @@ PASS  --out and --graph that differ only in case are refused on every host, beca
 PASS  and so they are where os.path.normcase keeps case, as it does on a Mac, whose default volume folds it  <-- pinned defect
 ...
 PASS  a file that cannot be written ends the run on exit 2 and a message, not on a traceback's exit 1, which reads as "something references it"  <-- pinned defect
+PASS  --dashboard without --apply writes nothing  <-- pinned defect
+...
+PASS  no credential reaches the page  <-- pinned defect
+...
+PASS  a sweep with unread items says NOT COMPLETE on the page and lists them, because a page that looked clean would be read as permission to delete  <-- pinned defect
+...
+PASS  --compare with two files and --dashboard writes nothing without --apply  <-- pinned defect
+...
+PASS  a page that would replace the graph the run compares with is refused  <-- pinned defect
+...
+PASS  a page that cannot be written ends the run on exit 2 and a message  <-- pinned defect
+...
+PASS  a write that fails at the rename leaves the old page and no partial file  <-- pinned defect
+...
 PASS  a title the console cannot encode is printed with a ? for each character, and the sweep still exits 1, because UnicodeEncodeError is a ValueError and used to make it exit 2  <-- pinned defect
 ...
+PASS  a title, a type, a target and a url that hold markup are escaped, so an item owner cannot put script on the page  <-- pinned defect
+...
+PASS  a diff on the page marks an edge of an unread item unknown, and says why  <-- pinned defect
+...
 PASS  a unique prefix of --apply is refused, because abbreviations would turn a typo into a write  <-- pinned defect
+PASS  a prefix of --dashboard is refused, because it names a file the run will write  <-- pinned defect
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-549 assertions, 0 failed
+600 assertions, 0 failed
 ```
 
-The full run prints all 549 assertions. It printed the same 549 lines on Windows under Python
-3.13. The `...` lines above are where this block is cut.
+The full run prints all 600 assertions. It printed the same 600 lines on Windows under
+Python 3.13 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this block is
+cut.
+
+Measured with `python -m coverage run --branch whobreaks.py --self-test`, the self-test covers
+100% of the statements and 100% of the branches of the file. No line is excluded, and no line
+needs a portal that the stand-in cannot play.
 
 ## Requirements
 
 Python 3.9 or newer. Standard library only: `urllib`, `json`, `csv`, `re`, `ssl`, `os`, `io`,
-`argparse`, `datetime`, `getpass`, `time`, and `http.server`, `threading`, `socket`, `tempfile`,
+`argparse`, `datetime`, `getpass`, `html`, `time`, and `http.server`, `threading`, `socket`, `tempfile`,
 `shutil` and `importlib` inside the self-test. It runs on ArcGIS Pro's Python and on a plain `python3`.
 `arcpy` is not used and the `arcgis` package is not needed.
 
@@ -403,6 +431,87 @@ unknown too. An app whose web map was unshared from the sweeping account still l
 and its edge is missing only because the map was not in the sweep to be named. An item that
 itself left the sweep takes its own edges with it, and those print as removed.
 
+## Watching the graph
+
+`--dashboard` writes the graph as one page. It is made from the same edges that `--graph` writes,
+and it is written only under `--apply`, like every other file this tool makes.
+
+```
+python whobreaks.py --url https://yourorg.maps.arcgis.com --target a1b2c3d4e5f60718293a4b5c6d7e8f90 \
+    --depth 3 --graph week2.json --dashboard board.html --compare week1.json --apply
+```
+
+This is the text of the page that `render_dashboard` makes for a graph of the second stand-in
+organization, with its tags removed, and with a graph of the week before for `--compare`. The ids
+are the self-test's stand-ins:
+
+```
+Who breaks if a1b2c3d4e5f60718293a4b5c6d7e8f90 goes
+Complete: every item was enumerated and read.
+edges | 8: 5 hard, 1 soft, 2 mention
+Breaks if the target is deleted, to depth 3
+hop | item | title | type | loads
+1 | f1000000000000000000000000000000 | Permit layers | Web Map | a1b2c3d4e5f60718293a4b5c6d7e8f90
+2 | f2000000000000000000000000000000 | Permit viewer | Web Mapping Application | f1000000000000000000000000000000
+2 | f7000000000000000000000000000000 | Permit filter board | Dashboard | f1000000000000000000000000000000
+3 | f3000000000000000000000000000000 | Permit site | Hub Site Application | f2000000000000000000000000000000
+Reference the target without breaking
+SOFT BREAK | f7000000000000000000000000000000 | Permit filter board | Dashboard
+MENTION ONLY | f5000000000000000000000000000000 | Permit handbook | StoryMap
+Changed since the graph taken 2026-09-20T14:00:00Z
+added | HARD BREAK | f3000000000000000000000000000000 | f2000000000000000000000000000000
+removed | HARD BREAK | f4000000000000000000000000000000 | f2000000000000000000000000000000
+Items that could not be read
+Every item was read.
+```
+
+The page also lists every edge of the sweep, worst class first. It follows the same rules as the
+console report. A break travels along hard edges only, so the filter board is listed under
+`Reference the target without breaking` and also at hop 2, because it loads the web map. A graph
+that is not complete puts `NOT COMPLETE` and every reason in a box at the top, and the unread
+items in their own table. A page made from an incomplete sweep says so at the top.
+
+With two graph files, the page is made offline from the second one and the first one is the
+earlier graph. This makes no request to the portal. A graph file holds item ids and no titles, so
+this page lists ids only. A page made from a sweep also carries the title and type of each item.
+
+```
+python whobreaks.py --compare week1.json week2.json --dashboard board.html --apply
+```
+
+What the page is, and what the self-test checked about it:
+
+- **One file with no script and no outside resource.** The page has an inline style and nothing
+  else. A `Content-Security-Policy` element says `default-src 'none'` and allows inline style, so
+  a browser that honours it loads nothing the file did not carry. The self-test looks for these
+  elements in the text. It did not open the page in a browser.
+- **Every value is escaped.** A title is typed by whoever owns the item. The self-test puts
+  `<script>alert(1)</script>`, a quote-and-tag type, a markup target and a markup url on the
+  page, and finds each of them as text. A control character becomes `?`, as on the console, and a
+  letter outside ASCII becomes a numeric reference, so the file is pure ASCII and reads the same
+  on every host.
+- **It reloads itself.** A `refresh` element asks the browser to load the file again every 300
+  seconds (`DASH_REFRESH_S`). A page left open then shows the next sweep without a key press. The
+  self-test checks that the element is there. A browser reloading was not exercised.
+- **It is replaced whole.** The page is written to `board.html.part` and renamed over the old
+  one. The self-test makes the rename fail, and the old page is still there and the `.part` file
+  is gone. Python documents `os.replace` as atomic on POSIX and makes no such promise for
+  Windows. The self-test did not race a reader against the rename on either host.
+- **It cannot overwrite what it reads.** `--dashboard` naming the same file as `--out`, as
+  `--graph` or as a `--compare` input is refused with exit 64, whatever the case of the name,
+  before the first request.
+- **It cannot be abbreviated.** `--dash` is refused, as `--ap` and `--app` are.
+
+Sources for what the page relies on:
+
+- Python `os.replace`: "If successful, the renaming will be an atomic operation (this is a POSIX
+  requirement)." https://docs.python.org/3/library/os.html#os.replace
+- A Content-Security-Policy in a `<meta http-equiv>` element, `default-src` as the fallback for the
+  other fetch directives, and `style-src` governing inline `<style>`.
+  https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy
+- `<meta http-equiv="refresh" content="300">` reloads the page after that many seconds, and a
+  short interval is an accessibility risk. https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/meta/http-equiv
+
 ## Usage
 
 | Flag | Default | What it does |
@@ -418,13 +527,15 @@ itself left the sweep takes its own edges with it, and those print as removed.
 | `--max-slices` | `4096` | Give up after this many created-date slices rather than splitting for ever. |
 | `--depth` | `1` | Follow hard breaks this many hops from the target. 1 lists the direct references only. |
 | `--graph` | none | File to write the edge list of the sweep to, as JSON. Needs `--apply`. |
+| `--dashboard` | none | File to write the dependency graph to as one static HTML page. Needs `--apply`. Made offline from the second file when `--compare` has two. Refused when it names the same file as `--out`, `--graph` or a `--compare` file. |
 | `--compare` | none | One graph file: print the edges added and removed since it. Two graph files: compare them offline, with no `--url`. |
 | `--insecure` | off | Skip TLS verification, for an Enterprise portal behind an internal CA. Refused together with `--username`. |
-| `--apply` | off | Write the `--out` report and the `--graph` file. Without it nothing is written. |
+| `--apply` | off | Write the `--out` report, the `--graph` file and the `--dashboard` page. Without it nothing is written. |
 | `--self-test` | off | Run the offline assertions and exit. |
 
-`--apply` writes local files only. It does not change the organization, and there is no flag
-that does. The password is never a flag either: `argv` is readable by every process on the
+`--apply` writes local files only: the report, the edge list and the page. It does not change the
+organization, and there is no flag that does. Every parser option is spelled out in full, because
+`allow_abbrev` is off: a prefix such as `--ap` or `--dash` is refused and exits 64. The password is never a flag either: `argv` is readable by every process on the
 machine, and the self-test asserts that no `--password` attribute exists at all. A password is
 never posted over plain `http://` either. The one exception is the loopback address, which the
 self-test uses.
@@ -516,8 +627,8 @@ It refuses, or reports as unknown, rather than guessing:
 |---|---|
 | 0 | nothing in the organization references the target, and every item was enumerated and read |
 | 1 | something references it, listed worst first |
-| 2 | the sweep could not be completed, so nothing can be concluded. An item was unreadable or read in part, the target item itself was unreadable, a search slice sat on the 10,000 ceiling, or a search page held a result with no usable id. Also when `--apply` could not write a file it was asked for, and when the tool met a failure it did not foresee |
-| 64 | usage error, including a flag that is unknown or has a bad value, a graph file that is missing, is not a graph, or covers a different scope, and an `--out` or `--graph` that is a folder |
+| 2 | the sweep could not be completed, so nothing can be concluded. An item was unreadable or read in part, the target item itself was unreadable, a search slice sat on the 10,000 ceiling, or a search page held a result with no usable id. Also when `--apply` could not write a file it was asked for, the page included, and when the tool met a failure it did not foresee |
+| 64 | usage error, including a flag that is unknown or has a bad value, a graph file that is missing, is not a graph, or covers a different scope, and an `--out`, `--graph` or `--dashboard` that is a folder or that names one file twice, and a `--dashboard` that names a graph file the run reads |
 
 `--depth` and a one-file `--compare` do not change the exit code of the sweep. A two-file
 `--compare` exits 0 when no edge changed and 1 when an edge did. It exits 2 when either graph is
@@ -550,6 +661,9 @@ and CSV files keep the title as the portal holds it.
 With `--depth` above 1, the JSON report also carries `depth`, `beyond` and a `transitive` list.
 Each row has the item's `id`, `title` and `type`, its `hop`, the first-hop item as `via`, and
 the item it `loads`. Every JSON report names the `service_url` it searched for, or null.
+
+The `--dashboard` page holds the same edges as the `--graph` file, with the title and type of each
+item when it comes from a sweep. See "Watching the graph" above.
 
 The `--graph` file holds `edges`, each with `from`, `to` and `kind`, sorted by `from` and then
 `to`. The flags are next to them: `complete`, `unread` (the ids of the items that could not be
@@ -603,6 +717,19 @@ and `taken`. The self-test asserts that no credential reaches this file either.
 - `--depth` inherits every limit above, at every hop. An unread item can load any broken item,
   so an incomplete sweep says so under the hop list as well, and still exits 2. An item outside
   the query is not in the sweep, so the chain stops at the edge of the query.
+- The dashboard is a set of tables, not a drawing of the graph. Each table is sorted and the full
+  edge list is on the page, so a sweep with tens of thousands of edges makes a long page. It was
+  not timed on one.
+- The dashboard has no history of its own. It shows the graph and the diff against one earlier
+  graph. A series of weeks needs a series of graph files, and the diff is against the one you pass.
+- A page made from graph files has ids and no titles, because the graph file stores none. Run a
+  sweep with `--dashboard` to get titles.
+- A `refresh` element reloads the file, not the portal. The page is as current as the last sweep
+  that wrote it. MDN warns that a short refresh interval is an accessibility problem, so the
+  interval is 300 seconds and it is a constant in the file, not a flag.
+- Python gives no atomic promise for `os.replace` on Windows. If the replace fails there for any
+  reason, the run exits 2 with a message and the old page stays. The self-test makes the rename
+  fail with an error it raises itself, not with a real viewer holding the file.
 - It does not delete, re-point or unshare anything. Repointing what it finds is `agol-relink`'s
   job.
 - Group membership, folder structure and sharing are out of scope. This tool answers one
@@ -629,3 +756,6 @@ Other single-file tools in this portfolio that pair with this one:
 - [agol-relink](https://github.com/uhsear/agol-relink) - repoint the references this finds, instead of deleting
 - [stalehost](https://github.com/uhsear/stalehost) - the whole-token rule that the service url match follows, applied to a retired host name on disk
 - [deadwidget](https://github.com/uhsear/deadwidget) - the finer grain inside one Experience Builder app: widgets bound to a layer or sublayer id that no longer exists
+
+A different project of the same name, `f1729/whobreaks`, does impact analysis on source code for AI
+coding tools. It does not read ArcGIS items.

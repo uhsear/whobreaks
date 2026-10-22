@@ -21,12 +21,15 @@ finds inside an item.
     python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --username gis_admin
     python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --token TOKEN --out breaks.csv --format csv --apply
     python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --token TOKEN --depth 3 --graph week2.json --apply
-    python whobreaks.py --compare week1.json week2.json
+    python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --token TOKEN --depth 3 --graph week2.json --dashboard board.html --compare week1.json --apply
+    python whobreaks.py --compare week1.json week2.json --dashboard board.html --apply
 
 --depth follows HARD breaks past the first hop, offline, over the references
 the same sweep recorded between every pair of items. The target's own service
 url is read once and searched for as text; no url found inside an item is
 ever opened. --graph writes the edge list and --compare diffs two of them.
+--dashboard writes the graph as one static page that a browser can keep open:
+the breaks, what changed since the earlier graph, and what could not be read.
 
 Exit codes: 0 nothing in the organization references the target, 1 something
 does, 2 the sweep could not be completed so nothing can be concluded, 64 usage
@@ -39,6 +42,7 @@ import argparse
 import csv
 import datetime
 import getpass
+import html
 import io
 import json
 import os
@@ -107,6 +111,11 @@ SECRET_ENV = "WHOBREAKS_PASSWORD"
 # credential for its lifetime, so it has the same reasons to stay off argv.
 # --token still works for a one-off run at a prompt.
 TOKEN_ENV = "WHOBREAKS_TOKEN"
+
+# Seconds between the dashboard page asking its browser to load the file again.
+# A scheduled run replaces the file, and a page left open on a screen then
+# shows the new graph without anybody pressing a key.
+DASH_REFRESH_S = 300
 
 # Hosts a password may be posted to over plain http: the self-test's stand-in
 # portal. Anywhere else, http would put the password on the wire in clear.
@@ -1227,6 +1236,195 @@ def describe_diff(old, new, added, removed, unknown):
             out.append("the %s graph is NOT complete, so an edge missing from "
                        "it is not proof that the reference is gone" % name)
     return out
+
+
+# ------------------------------------------------------------------ dashboard
+
+# The page is one file with no script and no outside resource. The policy says
+# so to the browser as well, because every title on it was typed by whoever owns
+# the item. Inline style is the only thing the policy allows.
+DASH_CSP = "default-src 'none'; style-src 'unsafe-inline'"
+
+DASH_CSS = """
+:root{--bg:#fafaf7;--fg:#1c1c1a;--mut:#6a6a64;--line:#d9d8d0;--hard:#b3261e;
+--soft:#9a6700;--mention:#57606a;--added:#1a7f37}
+@media (prefers-color-scheme:dark){:root{--bg:#161614;--fg:#ecece6;
+--mut:#a0a09a;--line:#3a3a36;--hard:#ff8a80;--soft:#e3b341;--mention:#9aa4ae;
+--added:#56d364}}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;
+margin:0 auto;max-width:72rem;padding:1rem 16px 3rem}
+h1{font-size:1.4rem;margin:.5rem 0}h2{font-size:1.1rem;margin:2rem 0 .5rem}
+.banner{border:2px solid var(--line);padding:.6rem .8rem;margin:1rem 0}
+.banner.bad{border-color:var(--hard)}.banner.ok{border-color:var(--added)}
+table{border-collapse:collapse;width:100%;display:block;overflow-x:auto}
+th,td{border-bottom:1px solid var(--line);padding:.3rem .6rem;text-align:left;
+vertical-align:top}
+th{color:var(--mut);font-weight:600}
+td{font-family:ui-monospace,monospace;font-size:.85rem;word-break:break-all}
+tr.hard td:first-child,tr.removed td:first-child{color:var(--hard)}
+tr.soft td:first-child,tr.unknown td:first-child{color:var(--soft)}
+tr.mention td:first-child{color:var(--mention)}
+tr.added td:first-child{color:var(--added)}
+.none,.foot{color:var(--mut)}
+"""
+
+
+def _h(text):
+    """One value, safe in HTML text. Control characters become ? first, as on
+    the console, and the markup characters become entities."""
+    return html.escape(CONTROL_RE.sub("?", "%s" % (text,)), quote=True)
+
+
+def _table(headers, rows, empty):
+    """An HTML table. rows are (class, cells). The class is always one of this
+    module's own words, never a value from the portal."""
+    if not rows:
+        return '<p class="none">%s</p>' % _h(empty)
+    out = ["<table><thead><tr>"]
+    out.extend("<th>%s</th>" % _h(head) for head in headers)
+    out.append("</tr></thead><tbody>")
+    for cls, cells in rows:
+        out.append('<tr class="%s">%s</tr>' % (
+            cls, "".join("<td>%s</td>" % _h(cell) for cell in cells)))
+    out.append("</tbody></table>")
+    return "".join(out)
+
+
+def render_dashboard(graph, previous=None, names=None, depth=1):
+    """The dependency graph as one static HTML page, returned as ASCII text.
+
+    graph is what build_graph or load_graph gives. previous is an earlier graph
+    of the same scope, or None. names maps an item id to {"title", "type"} and
+    is empty when the page is made from a file, which holds ids only.
+
+    Pure: nothing is read or written here, so the page can be checked without a
+    portal. Every value on it is escaped, and a character outside ASCII is
+    written as a numeric reference, so the file is the same on any host.
+    """
+    names = names or {}
+    target = graph["target"]
+    edges = graph["edges"]
+    unread = graph.get("unread") or []
+    unproven = graph.get("unproven") or []
+
+    def title(iid):
+        return (names.get(iid) or {}).get("title") or ""
+
+    def kind(iid):
+        return (names.get(iid) or {}).get("type") or ""
+
+    def known(key):
+        value = graph.get(key)
+        return "unknown" if value is None else value
+
+    body = ["<h1>Who breaks if %s goes</h1>" % _h(target)]
+    if graph["complete"]:
+        body.append('<div class="banner ok">Complete: every item was '
+                    'enumerated and read.</div>')
+    else:
+        why = ["%d item(s) could not be read" % len(unread)] if unread else []
+        why.extend(unproven)
+        body.append('<div class="banner bad">NOT COMPLETE. %s. An edge missing '
+                    'from this page is not proof that nothing references the '
+                    'target.</div>' % _h("; ".join(why) or "the sweep was "
+                                         "marked incomplete"))
+    counts = dict((k, sum(1 for e in edges if e["kind"] == k)) for k in RANK)
+    facts = [("portal", known("url")), ("query", known("query")),
+             ("graph taken", known("taken")),
+             ("items searched", known("scanned")),
+             ("service url searched", graph.get("service_url") or "none"),
+             ("edges", "%d: %d hard, %d soft, %d mention"
+              % (len(edges), counts[HARD], counts[SOFT], counts[MENTION]))]
+    body.append(_table(("fact", "value"),
+                       [("fact", [k, v]) for k, v in facts], ""))
+
+    reached, beyond = impact(edges, target, depth)
+    rows = [("hard", [hop, iid, title(iid), kind(iid), loads])
+            for iid, (hop, via, loads) in sorted(
+                reached.items(), key=lambda one: (one[1][0], one[0]))]
+    body.append("<h2>Breaks if the target is deleted, to depth %d</h2>" % depth)
+    body.append(_table(("hop", "item", "title", "type", "loads"), rows,
+                       "No item loads the target through a hard reference."))
+    if beyond:
+        body.append('<p class="foot">%d more item(s) load one at hop %d. Raise '
+                    '--depth to follow them.</p>' % (beyond, depth + 1))
+
+    direct = sorted((e for e in edges if e["to"] == target
+                     and e["kind"] != HARD),
+                    key=lambda e: (-RANK[e["kind"]], e["from"]))
+    body.append("<h2>Reference the target without breaking</h2>")
+    body.append(_table(("class", "item", "title", "type"),
+                       [(e["kind"], [LABEL[e["kind"]], e["from"],
+                                     title(e["from"]), kind(e["from"])])
+                        for e in direct],
+                       "No item filters on the target or names it in text."))
+
+    if previous is not None:
+        added, removed, unknown = diff_graphs(previous, graph)
+        body.append("<h2>Changed since the graph taken %s</h2>"
+                    % _h(previous.get("taken") or "an unknown date"))
+        body.append(_table(
+            ("change", "class", "item", "references"),
+            [(cls, [cls, LABEL[k], src, dst])
+             for cls, found in (("added", added), ("removed", removed),
+                                ("unknown", unknown))
+             for src, dst, k in found], "No edge changed."))
+        for older, name in ((previous, "previous"), (graph, "current")):
+            if not older.get("complete"):
+                body.append('<p class="foot">The %s graph is not complete, so '
+                            'an edge missing from it is not proof that the '
+                            'reference is gone.</p>' % name)
+        if unknown:
+            body.append('<p class="foot">An unknown edge belongs to an item '
+                        'one of the two sweeps could not read, or names an '
+                        'item one of them did not hold.</p>')
+
+    body.append("<h2>Items that could not be read</h2>")
+    body.append(_table(("item", "title"),
+                       [("unknown", [iid, title(iid)]) for iid in unread],
+                       "Every item was read."))
+    body.append("<h2>Every reference between the items of the sweep</h2>")
+    body.append(_table(
+        ("class", "item", "references", "title"),
+        [(e["kind"], [LABEL[e["kind"]], e["from"], e["to"], title(e["from"])])
+         for e in sorted(edges, key=lambda e: (-RANK[e["kind"]], e["from"],
+                                               e["to"]))],
+        "No item references another item."))
+    body.append('<p class="foot">Made by whobreaks from the graph above. A '
+                'reference by a url through another host, a proxy or a view '
+                'layer is not on this page.</p>')
+
+    page = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<meta http-equiv="Content-Security-Policy" content="%s">'
+            '<meta http-equiv="refresh" content="%d">'
+            '<title>whobreaks dependency graph</title><style>%s</style>'
+            '</head><body>%s</body></html>'
+            % (DASH_CSP, DASH_REFRESH_S, DASH_CSS, "\n".join(body)))
+    return page.encode("ascii", "xmlcharrefreplace").decode("ascii")
+
+
+def write_page(text, path):
+    """Write the dashboard so a reader never meets half of it, and return path.
+
+    The page is written beside its destination and then renamed over it. A
+    browser or a web server that reads the file while a scheduled run replaces
+    it sees the old page or the new one. A failed write leaves the old page and
+    removes the partial file.
+    """
+    _make_parent(path)
+    part = path + ".part"
+    try:
+        with io.open(part, "w", encoding="ascii", newline="\n") as handle:
+            handle.write(text)
+        os.replace(part, path)
+    except BaseException:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+    return path
 
 
 def is_http_url(url):
@@ -4126,6 +4324,207 @@ def self_test():
               "a file that cannot be written ends the run on exit 2 and a "
               "message, not on a traceback's exit 1, which reads as "
               "\"something references it\"  <-- pinned defect")
+        # ---- --dashboard: the graph as a page, written only under --apply
+        board = os.path.join(workdir, "board", "wide.html")
+        code, seen = captured(lambda: main(
+            ["--url", WIDE_URL, "--target", TARGET, "--token", LIVE_TOKEN,
+             "--dashboard", board]))
+        check(code == 1 and not os.path.exists(board)
+              and "Check only. No report was written" in seen,
+              "--dashboard without --apply writes nothing  <-- pinned defect")
+        before = len(server.seen)
+        code, seen = captured(lambda: main(
+            ["--url", WIDE_URL, "--target", TARGET, "--token", LIVE_TOKEN,
+             "--depth", "3", "--dashboard", board, "--apply"]))
+        check(code == 1 and os.path.isfile(board) and "wrote " in seen,
+              "--apply --dashboard writes the page, creates its folder, and "
+              "leaves the sweep's exit code alone")
+        with io.open(board, "rb") as handle:
+            page_bytes = handle.read()
+        page_text = page_bytes.decode("ascii")
+        check(page_text.startswith("<!doctype html>")
+              and not os.path.exists(board + ".part"),
+              "the page is a complete HTML document, pure ASCII, and no "
+              "partial file is left beside it")
+        check(all(one["from"] in page_text and one["to"] in page_text
+                  for one in wide_graph["edges"]),
+              "every edge of the graph is on the page")
+        check("Permit viewer" in page_text
+              and "<td>3</td><td>%s</td><td>Permit site</td>" % W_SITE
+              in page_text,
+              "the titles come from the sweep, and --depth 3 puts the site at "
+              "hop 3")
+        check("Complete: every item was enumerated and read." in page_text,
+              "a sweep that read everything says so")
+        check("<script" not in page_text.lower()
+              and ('http-equiv="Content-Security-Policy" '
+                   'content="default-src \'none\'') in page_text
+              and 'http-equiv="refresh" content="%d"' % DASH_REFRESH_S
+              in page_text,
+              "the page has no script, forbids every outside resource, and "
+              "asks its browser to reload it")
+        check(LIVE_TOKEN not in page_text,
+              "no credential reaches the page  <-- pinned defect")
+        check(not any("wide.html" in path for path in server.seen[before:]),
+              "and the portal was never asked for the page")
+
+        code, seen = captured(lambda: main(
+            ["--url", WIDE_URL, "--target", TARGET, "--token", LIVE_TOKEN,
+             "--depth", "3", "--compare", graph_zero, "--dashboard", board,
+             "--apply"]))
+        with io.open(board, encoding="ascii") as handle:
+            page_text = handle.read()
+        check(code == 1
+              and "Changed since the graph taken 2026-09-20T14:00:00Z"
+              in page_text
+              and ('<tr class="added"><td>added</td><td>HARD BREAK</td>'
+                   '<td>%s</td><td>%s</td></tr>' % (W_SITE, W_APP))
+              in page_text
+              and ('<tr class="removed"><td>removed</td><td>HARD BREAK</td>'
+                   '<td>%s</td><td>%s</td></tr>' % (W_NOTE, W_APP))
+              in page_text,
+              "--compare puts the edges added and removed since the earlier "
+              "graph on the page, and the new page replaces the old one")
+
+        board_live = os.path.join(workdir, "live.html")
+        code, seen = captured(lambda: main(
+            ["--url", LIVE, "--target", TARGET, "--token", LIVE_TOKEN,
+             "--dashboard", board_live, "--apply"]))
+        with io.open(board_live, "rb") as handle:
+            page_text = handle.read().decode("ascii")
+        check(code == 2 and "NOT COMPLETE" in page_text
+              and "2 item(s) could not be read" in page_text
+              and BIG_ID in page_text and DEAD_ID in page_text,
+              "a sweep with unread items says NOT COMPLETE on the page and "
+              "lists them, because a page that looked clean would be read as "
+              "permission to delete  <-- pinned defect")
+        check("Permit board &#35377;&#21487;" in page_text,
+              "and a title outside ASCII is written as a numeric reference, "
+              "so the file reads the same on every host")
+
+        # offline, from two graph files
+        before = len(server.seen)
+        offline = os.path.join(workdir, "offline.html")
+        code, seen = captured(lambda: main(
+            ["--compare", graph_zero, graph_one, "--dashboard", offline]))
+        check(code == 1 and not os.path.exists(offline)
+              and "Check only. No page was written" in seen,
+              "--compare with two files and --dashboard writes nothing "
+              "without --apply  <-- pinned defect")
+        code, seen = captured(lambda: main(
+            ["--compare", graph_zero, graph_one, "--dashboard", offline,
+             "--apply"]))
+        with io.open(offline, encoding="ascii") as handle:
+            page_text = handle.read()
+        check(code == 1 and "Changed since the graph taken 2026-09-20T14:00:00Z"
+              in page_text and W_SITE in page_text
+              and "Permit viewer" not in page_text,
+              "with --apply it writes the page for the second graph from the "
+              "two files, by id, because a graph file holds no titles")
+        check(len(server.seen) == before,
+              "without one request to the portal  <-- pinned defect")
+        code, seen = captured(lambda: main(
+            ["--compare", graph_base, graph_base, "--dashboard", offline,
+             "--apply"]))
+        with io.open(offline, encoding="ascii") as handle:
+            page_text = handle.read()
+        check(code == 2 and "NOT COMPLETE" in page_text
+              and "The previous graph is not complete" in page_text,
+              "an incomplete graph keeps its exit 2 and says so on the page")
+
+        # what --dashboard refuses before anything is read or written
+        guard_one = os.path.join(workdir, "guard", "G.json")
+        for argv, needle, label in (
+                (["--url", LIVE, "--target", TARGET, "--out", board,
+                  "--dashboard", board, "--apply"],
+                 "--out and --dashboard name the same file",
+                 "--out and --dashboard naming one file is a usage error  "
+                 "<-- pinned defect"),
+                (["--url", LIVE, "--target", TARGET, "--graph", guard_one,
+                  "--dashboard", guard_one.lower(), "--apply"],
+                 "--graph and --dashboard name the same file",
+                 "--graph and --dashboard that differ only in case are "
+                 "refused too  <-- pinned defect"),
+                (["--url", LIVE, "--target", TARGET, "--dashboard", workdir,
+                  "--apply"], "is a folder",
+                 "a --dashboard that is a folder is refused"),
+                (["--url", LIVE, "--target", TARGET, "--compare", graph_one,
+                  "--dashboard", graph_one, "--apply"],
+                 "a graph file this run reads",
+                 "a page that would replace the graph the run compares with is "
+                 "refused  <-- pinned defect"),
+                (["--compare", graph_zero, graph_one, "--dashboard",
+                  graph_one.upper(), "--apply"],
+                 "a graph file this run reads",
+                 "and so is one that would replace an input of an offline "
+                 "compare, whatever its case  <-- pinned defect"),
+                (["--compare", graph_zero, graph_one, "--dashboard", board,
+                  "--depth", "0", "--apply"], "--depth",
+                 "a --depth of zero is a usage error offline too"),
+                (["--url", "http://[::1", "--target", TARGET], "no user name",
+                 "a --url that urlsplit cannot parse is refused with the other "
+                 "malformed urls")):
+            before = len(server.seen)
+            code, seen = captured(lambda: main(argv))
+            check(code == 64 and needle in seen and len(server.seen) == before,
+                  label)
+        check(load_graph(graph_one)["target"] == TARGET,
+              "and the graph file is still a graph after those refusals")
+        code, seen = captured(lambda: main(
+            ["--url", WIDE_URL, "--target", TARGET, "--token", LIVE_TOKEN,
+             "--dashboard", os.path.join(blocker, "p.html"), "--apply"]))
+        check(code == 2 and "error:" in seen and "Traceback" not in seen,
+              "a page that cannot be written ends the run on exit 2 and a "
+              "message  <-- pinned defect")
+        code, seen = captured(lambda: main(
+            ["--compare", graph_zero, graph_one, "--dashboard",
+             os.path.join(blocker, "p.html"), "--apply"]))
+        check(code == 2 and "error:" in seen,
+              "and so does an offline compare, whatever the diff said")
+
+        # a reader never meets half a page
+        atomic = os.path.join(workdir, "atomic.html")
+        write_page(u"a page that is long", atomic)
+        write_page(u"short", atomic)
+        with io.open(atomic, encoding="ascii") as handle:
+            check(handle.read() == "short",
+                  "a page replaces the old one whole, not over its first "
+                  "bytes")
+
+        def refused_replace(src, dst):
+            raise OSError("replace refused")
+
+        kept_replace, os.replace = os.replace, refused_replace
+        failed_write = False
+        try:
+            try:
+                write_page(u"half a new page", atomic)
+            except OSError:
+                failed_write = True
+        finally:
+            os.replace = kept_replace
+        with io.open(atomic, encoding="ascii") as handle:
+            check(failed_write and handle.read() == "short"
+                  and not os.path.exists(atomic + ".part"),
+                  "a write that fails at the rename leaves the old page and "
+                  "no partial file  <-- pinned defect")
+
+        def refused_open(*args, **kwargs):
+            raise OSError("open refused")
+
+        kept_open, io.open = io.open, refused_open
+        failed_write = False
+        try:
+            try:
+                write_page(u"never written", os.path.join(workdir, "n.html"))
+            except OSError:
+                failed_write = True
+        finally:
+            io.open = kept_open
+        check(failed_write,
+              "and one that fails before a partial file exists reports the "
+              "failure, not a second error from cleaning up")
+
         code, seen = captured(lambda: main(
             ["--url", LIVE, "--target", TARGET, "--token", LIVE_TOKEN,
              "--query", "type:Dashboard"]), encoding="ascii")
@@ -4161,6 +4560,103 @@ def self_test():
           "every finding has exactly the csv columns, whatever the format")
     check("LIVE123" not in json.dumps(doc),
           "and no token from any error message is in it")
+
+    # ---- the dashboard page, without a portal
+    D_A, D_B, D_C = "a1" + "0" * 30, "b2" + "0" * 30, "c3" + "0" * 30
+    dash_graph = {
+        "whobreaks_graph": 1, "url": PORTAL, "query": "orgid:ORG",
+        "target": TARGET, "taken": "2026-10-01T00:00:00Z",
+        "service_url": None, "complete": True, "scanned": 3, "unread": [],
+        "unproven": [], "items": [D_A, D_B, D_C],
+        "edges": [{"from": D_A, "to": TARGET, "kind": HARD},
+                  {"from": D_B, "to": D_A, "kind": HARD},
+                  {"from": D_C, "to": TARGET, "kind": MENTION},
+                  {"from": D_B, "to": TARGET, "kind": SOFT}]}
+    dash_page = render_dashboard(dash_graph)
+    check(dash_page.startswith("<!doctype html>")
+          and dash_page.endswith("</html>")
+          and all(ord(ch) < 128 for ch in dash_page),
+          "the dashboard is one HTML document in pure ASCII")
+    check("Complete: every item was enumerated and read." in dash_page
+          and "4: 2 hard, 1 soft, 1 mention" in dash_page,
+          "a complete graph says so, and counts its edges by class")
+    check(dash_page.index("SOFT BREAK") < dash_page.index("MENTION ONLY"),
+          "the references that do not break list soft before mention")
+    breaks_part = dash_page.split("<h2>")[1]
+    check("<td>1</td><td>%s</td>" % D_A in breaks_part
+          and D_B not in breaks_part,
+          "the breaks table holds the hard reference at hop 1, and not the "
+          "item that only filters on the target, at depth 1")
+    check("1 more item(s) load one at hop 2. Raise --depth to follow them."
+          in dash_page,
+          "a depth that stops short says so on the page")
+    deep_page = render_dashboard(dash_graph, depth=2)
+    check("<td>2</td><td>%s</td>" % D_B in deep_page
+          and "Raise --depth" not in deep_page,
+          "--depth 2 puts the item that loads the first one at hop 2")
+    check('<tr class="soft"><td>SOFT BREAK</td><td>%s</td>' % D_B in deep_page,
+          "and the same item, which also filters on the target, is listed "
+          "under the references that do not break  <-- pinned defect")
+    named_page = render_dashboard(dash_graph, names={
+        D_A: {"title": "Alpha map", "type": "Web Map"}, D_B: None})
+    check("<td>Alpha map</td><td>Web Map</td>" in named_page,
+          "titles and types come from the names given")
+
+    hostile = render_dashboard(
+        dict(dash_graph, target="<b>t</b>", url="http://x/\"><img src=x>"),
+        names={D_A: {"title": "<script>alert(1)</script>\x1b[2K caf\u00e9",
+                     "type": "\"><img src=x onerror=1>"}})
+    check("&lt;script&gt;alert(1)&lt;/script&gt;" in hostile
+          and "<script" not in hostile and "<img" not in hostile
+          and "&lt;b&gt;t&lt;/b&gt;" in hostile,
+          "a title, a type, a target and a url that hold markup are escaped, "
+          "so an item owner cannot put script on the page  <-- pinned defect")
+    check("\x1b" not in hostile and "?[2K caf&#233;" in hostile,
+          "a control character in a title becomes ?, as on the console, and "
+          "a letter outside ASCII becomes a numeric reference")
+
+    empty_page = render_dashboard(dict(dash_graph, edges=[], unread=None,
+                                       unproven=None))
+    check("No item loads the target through a hard reference." in empty_page
+          and "No item filters on the target or names it in text." in empty_page
+          and "Every item was read." in empty_page
+          and "No item references another item." in empty_page,
+          "a graph with no edge says so in each section, and not with an "
+          "empty table")
+    bare_page = render_dashboard({"target": TARGET, "complete": True,
+                                  "edges": []})
+    check("<td>graph taken</td><td>unknown</td>" in bare_page,
+          "a graph file that lacks a field prints unknown, not None")
+    incomplete = render_dashboard(dict(
+        dash_graph, complete=False, unread=[D_C],
+        unproven=["a slice stayed on the ceiling"]))
+    check("NOT COMPLETE. 1 item(s) could not be read; a slice stayed on the "
+          "ceiling." in incomplete and "<td>%s</td><td></td>" % D_C
+          in incomplete,
+          "an incomplete graph says NOT COMPLETE with every reason, and lists "
+          "the unread ids  <-- pinned defect")
+    check("marked incomplete" in render_dashboard(dict(dash_graph,
+                                                       complete=False)),
+          "and one that is merely flagged says that much")
+
+    older = dict(dash_graph, taken=None, complete=False, unread=[D_B],
+                 edges=[{"from": D_B, "to": D_C, "kind": HARD}])
+    diff_page = render_dashboard(dash_graph, older)
+    check("Changed since the graph taken an unknown date" in diff_page
+          and "The previous graph is not complete" in diff_page
+          and "The current graph is not complete" not in diff_page
+          and '<tr class="unknown"><td>unknown</td>' in diff_page
+          and "An unknown edge belongs to an item" in diff_page,
+          "a diff on the page marks an edge of an unread item unknown, and "
+          "says why  <-- pinned defect")
+    same_page = render_dashboard(dash_graph, dash_graph)
+    check("No edge changed." in same_page and "Changed since" in same_page
+          and "unknown edge" not in same_page,
+          "a graph compared with itself says no edge changed")
+    both_page = render_dashboard(dict(dash_graph, complete=False),
+                                 dict(dash_graph, complete=False))
+    check("The current graph is not complete" in both_page,
+          "and the current graph's own flag is reported too")
 
     # ---- argument handling
     args = _parse(["--url", PORTAL, "--target", TARGET])
@@ -4199,9 +4695,9 @@ def self_test():
     refuses(["--url", PORTAL, "--num", "lots"], "a non-numeric --num is refused")
     refuses(["--target"], "a --target with no value is refused")
     noise, sys.stderr = sys.stderr, io.StringIO()
+    typo = "accepted"
     try:
         _parse(["--url", PORTAL, "--depth", "two"])
-        typo = None
     except SystemExit as exc:
         typo = exc.code
     finally:
@@ -4220,6 +4716,22 @@ def self_test():
     refuses(["--url", PORTAL, "--target", TARGET, "--ap"],
             "a unique prefix of --apply is refused, because abbreviations would "
             "turn a typo into a write  <-- pinned defect")
+    refuses(["--url", PORTAL, "--target", TARGET, "--app"],
+            "so is a longer prefix of --apply  <-- pinned defect")
+    refuses(["--url", PORTAL, "--target", TARGET, "--dash", "p.html"],
+            "a prefix of --dashboard is refused, because it names a file the "
+            "run will write  <-- pinned defect")
+    check(args.dashboard is None,
+          "nothing is written by default: --dashboard has no default file")
+    check(_parse(["--dashboard", "p.html"]).dashboard == "p.html",
+          "--dashboard is read")
+    helped = "help ran"
+    try:
+        captured(lambda: _parse(["--help"]))
+    except SystemExit as exc:
+        helped = exc.code
+    check(helped == 0,
+          "--help exits 0, not the usage error 64 that a bad flag gets")
 
     # ---- the harness itself, which has to be able to report red
     #
@@ -4295,7 +4807,8 @@ def _parse(argv):
         prog="whobreaks.py",
         description="Report every item in an ArcGIS organization that "
                     "references the item you are about to delete.",
-        epilog="Read-only. No flag deletes, moves or edits anything. The "
+        epilog="Read-only. No flag deletes, moves or edits anything in the "
+               "organization. --apply writes local files only. The "
                "password is never a flag: export %s or answer the prompt."
                % SECRET_ENV,
         allow_abbrev=False,
@@ -4333,6 +4846,10 @@ def _parse(argv):
     ap.add_argument("--graph",
                     help="file to write the edge list of this sweep to, as "
                          "json, with --apply")
+    ap.add_argument("--dashboard",
+                    help="file to write the dependency graph to as one static "
+                         "html page, with --apply. With two --compare files it "
+                         "is made offline from the second.")
     ap.add_argument("--compare", nargs="+", metavar="GRAPH",
                     help="print the edges added and removed since a graph "
                          "file. With one file, against this sweep. With two, "
@@ -4342,8 +4859,9 @@ def _parse(argv):
                          "portal behind an internal CA. Refused together with "
                          "--username.")
     ap.add_argument("--apply", action="store_true",
-                    help="write the report file. Without this the sweep runs "
-                         "and prints, and nothing is written.")
+                    help="write the --out, --graph and --dashboard files. "
+                         "Without this the sweep runs and prints, and nothing "
+                         "is written.")
     ap.add_argument("--self-test", dest="self_test", action="store_true",
                     help="run the offline assertions and exit")
     try:
@@ -4381,6 +4899,44 @@ def main(argv=None):
         return 2
 
 
+def _same_file(first, second):
+    """True when two paths name one file on a host that folds case.
+
+    Compared without case on every host. On Windows and on macOS's default
+    volume rep.json and REP.json are one file, and os.path.normcase folds case
+    on Windows only, so on a Mac the graph overwrote the report.
+    """
+    return (os.path.normcase(os.path.abspath(first)).lower()
+            == os.path.normcase(os.path.abspath(second)).lower())
+
+
+def _dashboard_problem(args, graphs):
+    """Why the files this run would write cannot be written, or None.
+
+    Two of them naming one file means the second write destroys the first. The
+    dashboard also must not land on a graph this run reads, because a rename
+    over it would replace the evidence the next run compares with.
+    """
+    writes = [(flag, path) for flag, path in (("--out", args.out),
+                                              ("--graph", args.graph),
+                                              ("--dashboard", args.dashboard))
+              if path]
+    for n, (flag, path) in enumerate(writes):
+        for other, other_path in writes[n + 1:]:
+            if _same_file(path, other_path):
+                return ("%s and %s name the same file, and the second would "
+                        "overwrite the first." % (flag, other))
+        if os.path.isdir(path):
+            return ("%s is a folder. --out, --graph and --dashboard name the "
+                    "file to write." % path)
+    if args.dashboard:
+        for old in graphs:
+            if _same_file(args.dashboard, old):
+                return ("--dashboard names %s, a graph file this run reads, "
+                        "and the page would replace it." % old)
+    return None
+
+
 def _run(args):
     """Everything main() does after the self-test, as an exit code."""
     if args.compare and len(args.compare) > 2:
@@ -4393,7 +4949,15 @@ def _run(args):
                   "or pass one file to compare it with a new sweep.",
                   file=sys.stderr)
             return 64
-        return compare_files(args.compare[0], args.compare[1])
+        problem = args.dashboard and _dashboard_problem(args, args.compare)
+        if problem:
+            print("error: %s" % problem, file=sys.stderr)
+            return 64
+        if args.dashboard and args.depth < 1:
+            print("error: --depth must be at least 1.", file=sys.stderr)
+            return 64
+        return compare_files(args.compare[0], args.compare[1],
+                             args.dashboard, args.apply, args.depth)
 
     if not args.url:
         print("error: --url is required. Use --self-test to verify the tool "
@@ -4428,24 +4992,15 @@ def _run(args):
     except ValueError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 64
-    if args.apply and not (args.out or args.graph):
-        print("error: --apply needs --out or --graph, the file to write the "
-              "report or the edge list to.", file=sys.stderr)
+    if args.apply and not (args.out or args.graph or args.dashboard):
+        print("error: --apply needs --out, --graph or --dashboard, the file "
+              "to write the report, the edge list or the page to.",
+              file=sys.stderr)
         return 64
-    # Compared without case on every host. On Windows and on macOS's default
-    # volume rep.json and REP.json are one file, and os.path.normcase folds
-    # case on Windows only, so on a Mac the graph overwrote the report.
-    if (args.out and args.graph
-            and os.path.normcase(os.path.abspath(args.out)).lower()
-            == os.path.normcase(os.path.abspath(args.graph)).lower()):
-        print("error: --out and --graph name the same file, and the second "
-              "would overwrite the first.", file=sys.stderr)
+    problem = _dashboard_problem(args, args.compare or ())
+    if problem:
+        print("error: %s" % problem, file=sys.stderr)
         return 64
-    for path in (args.out, args.graph):
-        if path and os.path.isdir(path):
-            print("error: %s is a folder. --out and --graph name the file to "
-                  "write." % path, file=sys.stderr)
-            return 64
     if args.depth < 1:
         print("error: --depth must be at least 1.", file=sys.stderr)
         return 64
@@ -4539,7 +5094,7 @@ def _run(args):
                                   *diff_graphs(previous, graph)):
             say(line)
 
-    if args.out or args.graph:
+    if args.out or args.graph or args.dashboard:
         if not args.apply:
             print("")
             print("Check only. No report was written. Re-run with --apply.")
@@ -4553,6 +5108,10 @@ def _run(args):
                     say("wrote %s" % writer(document, args.out))
                 if args.graph:
                     say("wrote %s" % write_json(graph, args.graph))
+                if args.dashboard:
+                    say("wrote %s" % write_page(
+                        render_dashboard(graph, previous, report.names,
+                                         args.depth), args.dashboard))
             except OSError as exc:
                 # Exit 2, not the traceback's 1: a scheduled run that reads
                 # the file must not read "something references it" and then
@@ -4563,8 +5122,12 @@ def _run(args):
     return exit_code(report)
 
 
-def compare_files(old_path, new_path):
+def compare_files(old_path, new_path, dashboard=None, apply=False, depth=1):
     """--compare OLD NEW: diff two graph files. No portal, no network at all.
+
+    With a dashboard path, the page for NEW is made from the two files, and
+    written only when apply is true. The exit code is the diff's either way,
+    except that a page that could not be written is exit 2.
 
     Exits 0 when no edge changed, 1 when one did, and 2 when either graph is
     incomplete, whatever the diff says: an edge missing from a sweep that could
@@ -4589,6 +5152,16 @@ def compare_files(old_path, new_path):
     encoding = getattr(sys.stdout, "encoding", None)
     for line in describe_diff(old, new, added, removed, unknown):
         print(printable(line, encoding))
+    if dashboard and not apply:
+        print("Check only. No page was written. Re-run with --apply.")
+    elif dashboard:
+        try:
+            print(printable("wrote %s" % write_page(
+                render_dashboard(new, old, None, depth), dashboard),
+                encoding))
+        except OSError as exc:
+            complain(scrub(exc))
+            return 2
     if not (old.get("complete") and new.get("complete")) or unknown:
         return 2
     return 1 if (added or removed) else 0
