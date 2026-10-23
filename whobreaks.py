@@ -5,8 +5,9 @@ A delete in an ArcGIS organization is not reversible and the portal asks for no
 more than a confirmation. This tool reads the CONFIGURATION of every item in
 the organization, finds the ones that name the target item id, and sorts them
 into a hard break (a data source or a layer reference), a soft break (a filter,
-a bookmark, a popup reference) and a mention in free text. It is read-only:
-there is no flag that deletes, moves or edits anything.
+a bookmark, a popup reference) and a mention in free text. It reads. Its one
+write to the organization is --publish under --apply, which adds or replaces
+the file of one item of its own. No flag deletes, moves or shares anything.
 
 arcgis.apps.itemgraph is the obvious tool, and it does a lot. It reads /data
 and the known draft resources of web maps, dashboards, Experience Builder apps,
@@ -23,6 +24,8 @@ finds inside an item.
     python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --token TOKEN --depth 3 --graph week2.json --apply
     python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --token TOKEN --depth 3 --graph week2.json --dashboard board.html --compare week1.json --apply
     python whobreaks.py --compare week1.json week2.json --dashboard board.html --apply
+    python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --token TOKEN --publish --apply
+    python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --token TOKEN --publish GRAPHITEMID --apply
 
 --depth follows HARD breaks past the first hop, offline, over the references
 the same sweep recorded between every pair of items. The target's own service
@@ -30,6 +33,10 @@ url is read once and searched for as text; no url found inside an item is
 ever opened. --graph writes the edge list and --compare diffs two of them.
 --dashboard writes the graph as one static page that a browser can keep open:
 the breaks, what changed since the earlier graph, and what could not be read.
+--publish puts the graph in the portal as one item, so a scheduled
+sweep keeps it current where people already look. Without an item id it adds
+the item and prints its id. With an id it replaces that item's file, and only
+when the item is one this tool made for the same target.
 
 Exit codes: 0 nothing in the organization references the target, 1 something
 does, 2 the sweep could not be completed so nothing can be concluded, 64 usage
@@ -116,6 +123,14 @@ TOKEN_ENV = "WHOBREAKS_TOKEN"
 # A scheduled run replaces the file, and a page left open on a screen then
 # shows the new graph without anybody pressing a key.
 DASH_REFRESH_S = 300
+
+# The item type --publish gives the graph file, and the tag that marks an item
+# as this tool's own. The Esri documentation lists "Code Attachment" as a file
+# item and lists no type for an arbitrary .json or .html upload, so this is the
+# nearest documented file type, not a promise that every portal takes a .json
+# file for it. The tag is what lets --publish refuse to overwrite any other item.
+PUBLISH_TYPE = "Code Attachment"
+PUBLISH_TAG = "whobreaks"
 
 # Hosts a password may be posted to over plain http: the self-test's stand-in
 # portal. Anywhere else, http would put the password on the wire in clear.
@@ -1501,9 +1516,31 @@ def _opener(insecure):
         urllib.request.HTTPSHandler(context=context))
 
 
+def encode_multipart(fields, upload, boundary):
+    """The body and the Content-Type of one multipart/form-data request.
+
+    fields is a dict of text parts. upload is (field, filename, bytes), the one
+    file part. addItem and update take a file only as a multipart request; the
+    urlencoded form every other call here uses cannot carry one. The caller
+    picks the boundary, random, so that the content cannot contain it.
+    """
+    name, filename, content = upload
+    head = "".join('--%s\r\nContent-Disposition: form-data; name="%s"\r\n\r\n'
+                   '%s\r\n' % (boundary, key, fields[key])
+                   for key in sorted(fields))
+    head += ('--%s\r\nContent-Disposition: form-data; name="%s"; '
+             'filename="%s"\r\nContent-Type: application/json\r\n\r\n'
+             % (boundary, name, filename))
+    body = (head.encode("utf-8") + content
+            + ("\r\n--%s--\r\n" % boundary).encode("ascii"))
+    return body, "multipart/form-data; boundary=%s" % boundary
+
+
 def _open(url, path, params, insecure=False, post=False, secret=None,
-          limit=MAX_BODY_BYTES):
+          limit=MAX_BODY_BYTES, upload=None):
     """One REST call, returning the raw body, capped at limit bytes.
+
+    upload, (field, filename, bytes), sends the call as multipart/form-data.
 
     Capped here rather than in the caller, because /data is whatever the owner
     uploaded. A file geodatabase item's /data is the entire upload, and a
@@ -1516,7 +1553,12 @@ def _open(url, path, params, insecure=False, post=False, secret=None,
     data = urllib.parse.urlencode(params).encode("utf-8")
     opener = _opener(insecure)
     try:
-        if post:
+        if upload:
+            body, kind = encode_multipart(
+                params, upload, "whobreaks" + os.urandom(12).hex())
+            response = opener.open(urllib.request.Request(
+                endpoint, body, {"Content-Type": kind}), timeout=HTTP_TIMEOUT)
+        elif post:
             response = opener.open(endpoint, data, timeout=HTTP_TIMEOUT)
         else:
             response = opener.open("%s?%s" % (endpoint, data.decode("utf-8")),
@@ -1531,13 +1573,15 @@ def _open(url, path, params, insecure=False, post=False, secret=None,
                                   params.get("password")))
 
 
-def _call(url, path, params, insecure=False, post=False, secret=None):
+def _call(url, path, params, insecure=False, post=False, secret=None,
+          upload=None):
     """One REST call returning parsed JSON, with the portal's errors raised.
 
     The portal answers HTTP 200 with an error object in the body, so the status
     code proves nothing and the body has to be read every time.
     """
-    raw = _open(url, path, params, insecure=insecure, post=post, secret=secret)
+    raw = _open(url, path, params, insecure=insecure, post=post, secret=secret,
+                upload=upload)
     endpoint = "%s/sharing/rest/%s" % (url.rstrip("/"), path.lstrip("/"))
     try:
         body = json.loads(raw.decode("utf-8"))
@@ -1768,6 +1812,99 @@ def item_url(url, token, target, insecure=False):
     return body.get("url")
 
 
+# ------------------------------------------------------------------- publish
+
+def community_user(url, token, insecure=False):
+    """The user name the token belongs to, from community/self."""
+    body = _call(url, "community/self", {"token": token}, insecure=insecure,
+                 secret=token)
+    name = body.get("username")
+    if not name or not isinstance(name, str):
+        raise RuntimeError("community/self returned no user name for this "
+                           "token")
+    return name
+
+
+def publish_fields(target, taken, complete):
+    """The item properties --publish sends: its title, tags and description.
+
+    The second tag names the target, so that an item published for one target
+    is never overwritten with the graph of another. The description says in
+    words whether the sweep was complete, because the item may be opened by
+    somebody who never saw the console.
+    """
+    return {
+        "type": PUBLISH_TYPE,
+        "title": "whobreaks graph %s" % target,
+        "tags": "%s,%s-%s" % (PUBLISH_TAG, PUBLISH_TAG, target),
+        "description": "Who breaks if %s is deleted, taken %s. %s Written by "
+                       "whobreaks. It is not shared by whobreaks."
+                       % (target, taken,
+                          "Complete." if complete else
+                          "NOT COMPLETE: read the unread list before use."),
+    }
+
+
+def publish_problem(info, username, target):
+    """Why an existing item must not be overwritten with the graph, or None.
+
+    An item id typed to --publish could be a web map. update replaces an item's
+    file, so the item has to be this user's, of this type, and tagged as this
+    tool's graph of this target. Anything else is refused.
+    """
+    tags = info.get("tags")
+    if info.get("owner") != username:
+        return "it is owned by another user"
+    if info.get("type") != PUBLISH_TYPE:
+        return "its type is %s, not %s" % (info.get("type"), PUBLISH_TYPE)
+    if not (isinstance(tags, list) and PUBLISH_TAG in tags
+            and "%s-%s" % (PUBLISH_TAG, target) in tags):
+        return "it is not a graph this tool published for %s" % target
+    return None
+
+
+def publish_graph(url, token, graph, item=None, insecure=False):
+    """Add the graph to the portal as an item, or replace the file of
+    the item it made earlier. Returns (item id, bytes sent).
+
+    The portal answers HTTP 200 with an error object, and a file item can
+    succeed and still hold other bytes, so the item's data is read back and
+    compared. This is the one call here that writes to the organization, and
+    nothing calls it without --apply. It never shares the item.
+    """
+    payload = json.dumps(graph, indent=1, sort_keys=True).encode("utf-8")
+    user = community_user(url, token, insecure)
+    fields = publish_fields(graph["target"], graph["taken"], graph["complete"])
+    if item:
+        info = _call(url, "content/items/%s" % item, {"token": token},
+                     insecure=insecure, secret=token)
+        problem = publish_problem(info, user, graph["target"])
+        if problem:
+            raise RuntimeError("item %s was not overwritten: %s" % (item,
+                                                                   problem))
+        del fields["type"]
+        path = "content/users/%s/items/%s/update" % (
+            urllib.parse.quote(user, safe=""), item)
+    else:
+        path = "content/users/%s/addItem" % urllib.parse.quote(user, safe="")
+    fields["token"] = token
+    body = _call(url, path, fields, insecure=insecure, post=True,
+                 secret=token, upload=(
+                     "file", "whobreaks-graph-%s.json" % graph["target"],
+                     payload))
+    if body.get("success") is not True or not body.get("id"):
+        raise RuntimeError("the portal did not accept the graph: %s"
+                           % redact(json.dumps(body, sort_keys=True), token))
+    stored = _open(url, "content/items/%s/data" % body["id"],
+                   {"token": token}, insecure=insecure, secret=token,
+                   limit=len(payload) + 1)
+    if stored != payload:
+        raise RuntimeError("item %s was written, but reading it back gave "
+                           "different bytes, so do not rely on it"
+                           % body["id"])
+    return body["id"], len(payload)
+
+
 def _make_parent(path):
     """Create the directory the output file goes in, when it is missing."""
     parent = os.path.dirname(path)
@@ -1808,6 +1945,7 @@ def self_test():
     function starts on 127.0.0.1, so that the HTTP layer underneath the pure
     core is exercised by the same run rather than described.
     """
+    import email
     import http.server
     import shutil
     import socket
@@ -3414,8 +3552,27 @@ def self_test():
 
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length).decode("utf-8")
+            raw = self.rfile.read(length)
+            body = raw.decode("utf-8")
             self.server.posted.append(body)
+            kind = self.headers.get("Content-Type") or ""
+            if kind.startswith("multipart/form-data"):
+                # Parsed by the email package, which shares no code with
+                # encode_multipart, so the encoder is checked by a reader
+                # that did not write it.
+                message = email.message_from_bytes(
+                    ("Content-Type: %s\r\n\r\n" % kind).encode("ascii") + raw)
+                params = {}
+                for part in message.get_payload():
+                    name = part.get_param("name", header="content-disposition")
+                    content = part.get_payload(decode=True)
+                    if part.get_filename():
+                        params[name] = None
+                        self.server.upload = (name, part.get_filename(),
+                                              content, part.get_content_type())
+                    else:
+                        params[name] = content.decode("utf-8")
+                return self._route(self.path, params)
             self._route(self.path, dict(urllib.parse.parse_qsl(body)))
 
         def _route(self, path, params):
@@ -3450,6 +3607,13 @@ def self_test():
                 return self._json({"token": LIVE_TOKEN, "expires": 1})
             if route == "portals/self":
                 return self._json({} if blind else {"id": "REALORG"})
+            if route == "community/self":
+                if params.get("token") != LIVE_TOKEN:
+                    return self._json({"error": {"code": 498, "message":
+                                       "Invalid token."}})
+                return self._json(self.server.who)
+            if route.startswith("content/users/"):
+                return self._publish(route[len("content/users/"):], params)
             if route == "notanobject":
                 return self._json(["maintenance", "in progress"])
             if route == "search" and variant == "/badid":
@@ -3505,8 +3669,57 @@ def self_test():
                     return False
             return True
 
+        def _publish(self, rest, params):
+            """addItem and update, as the REST reference describes them."""
+            user, _slash, call = rest.partition("/")
+            user = urllib.parse.unquote(user)
+            steps = call.split("/")
+            adding = call == "addItem"
+            replacing = (len(steps) == 3 and steps[0] == "items"
+                         and steps[2] == "update"
+                         and steps[1] in self.server.stored)
+            if not (adding or replacing):
+                return self._json({"error": {"code": 400,
+                                             "message": "unhandled " + rest}})
+            if params.get("token") != LIVE_TOKEN:
+                return self._json({"error": {"code": 498, "message":
+                                   "Invalid token."}})
+            if self.server.mode == "refuse":
+                return self._json({"error": {"code": 400, "message":
+                                   "Unable to add item (token %s)."
+                                   % params.get("token")}})
+            if self.server.mode == "failed":
+                return self._json({"success": False})
+            name, filename, content, ctype = self.server.upload
+            if adding:
+                iid = "ab%030x" % (len(self.server.stored) + 1)
+                self.server.stored[iid] = {
+                    "id": iid, "owner": user, "type": params.get("type"),
+                    "tags": params.get("tags").split(","),
+                    "title": params.get("title"),
+                    "description": params.get("description"),
+                    "access": "private", "file": filename, "ctype": ctype,
+                    "data": content}
+            else:
+                iid = steps[1]
+                self.server.stored[iid].update(
+                    data=content, file=filename, title=params.get("title"),
+                    description=params.get("description"))
+            if self.server.mode == "noid":
+                return self._json({"success": True})
+            if self.server.mode == "corrupt":
+                self.server.stored[iid]["data"] = content + b" "
+            return self._json({"success": True, "id": iid})
+
         def _item(self, rest, variant, params):
             iid, _slash, tail = rest.partition("/")
+            if iid in self.server.stored:
+                kept = self.server.stored[iid]
+                if tail == "data":
+                    return self._send(kept["data"], ctype=kept["ctype"])
+                return self._json(dict((key, kept[key]) for key in
+                                       ("id", "owner", "type", "tags",
+                                        "title", "access")))
             if iid == PRIV_ID or (not tail and variant == "/noinfo"):
                 # HTTP 200 carrying an error object, which is how a portal
                 # says no. The status code proves nothing.
@@ -3564,6 +3777,10 @@ def self_test():
     server.posted = []
     server.cap_next = False
     server.service_url = None
+    server.stored = {}                  # items the publish calls made or hold
+    server.upload = None
+    server.mode = "ok"                  # ok, refuse, failed, noid or corrupt
+    server.who = {"username": "gis_admin"}
     thread = threading.Thread(target=server.serve_forever)
     thread.daemon = True
     thread.start()
@@ -4533,6 +4750,258 @@ def self_test():
               "character, and the sweep still exits 1, because "
               "UnicodeEncodeError is a ValueError and used to make it exit 2  "
               "<-- pinned defect")
+
+        # ---- --publish: the graph as one item, only under --apply
+        #
+        # The multipart encoder is read back by the email package, which shares
+        # no code with it.
+        sent, mp_kind = encode_multipart(
+            {"b": "two", "a": "one"},
+            ("file", "g.json", b'{"k": "line\r\none\r\n--BOUND12 x"}'),
+            "BOUND12")
+        parsed = email.message_from_bytes(
+            ("Content-Type: %s\r\n\r\n" % mp_kind).encode("ascii") + sent)
+        parts = parsed.get_payload()
+        check(mp_kind == "multipart/form-data; boundary=BOUND12"
+              and [p.get_param("name", header="content-disposition")
+                   for p in parts] == ["a", "b", "file"],
+              "the multipart body has its text parts in key order and the "
+              "file last, under the boundary the header names")
+        check([p.get_payload(decode=True) for p in parts]
+              == [b"one", b"two", b'{"k": "line\r\none\r\n--BOUND12 x"}']
+              and parts[2].get_filename() == "g.json"
+              and parts[2].get_content_type() == "application/json",
+              "and an independent reader gets every value and the file bytes "
+              "back, including a carriage return and a near boundary inside "
+              "the file")
+
+        fields = publish_fields(TARGET, "2026-10-01T00:00:00Z", True)
+        check(fields["type"] == "Code Attachment"
+              and fields["title"] == "whobreaks graph " + TARGET
+              and fields["tags"] == "whobreaks,whobreaks-" + TARGET
+              and "Complete." in fields["description"],
+              "the item is a Code Attachment titled and tagged for its target")
+        check("NOT COMPLETE" in publish_fields(TARGET, "t", False)
+              ["description"],
+              "and the description of an incomplete sweep says so in words  "
+              "<-- pinned defect")
+        good = {"owner": "gis_admin", "type": "Code Attachment",
+                "tags": ["whobreaks", "whobreaks-" + TARGET]}
+        check(publish_problem(good, "gis_admin", TARGET) is None,
+              "an item this user made for this target may be replaced")
+        for label, changed, want in (
+                ("another user's item", {"owner": "ann"}, "another user"),
+                ("a web map", {"type": "Web Map"}, "Web Map"),
+                ("a graph of another target",
+                 {"tags": ["whobreaks", "whobreaks-" + OTHER]}, "published"),
+                ("an untagged item", {"tags": ["whobreaks"]}, "published"),
+                ("an item with no tag list", {"tags": None}, "published")):
+            bad = dict(good)
+            bad.update(changed)
+            why = publish_problem(bad, "gis_admin", TARGET)
+            check(why is not None and want in why,
+                  "%s is refused as a place to put the graph  "
+                  "<-- pinned defect" % label)
+
+        # nothing is published without --apply
+        before = (len(server.posted), len(server.stored))
+        code, seen = captured(lambda: main(
+            ["--url", LIVE, "--target", TARGET, "--token", LIVE_TOKEN,
+             "--publish"]))
+        check(code == 2 and "Check only. Nothing was published" in seen
+              and (len(server.posted), len(server.stored)) == before,
+              "--publish without --apply sends no POST and adds no item  "
+              "<-- pinned defect")
+
+        before = len(server.seen)
+        code, seen = captured(lambda: main(
+            ["--url", LIVE, "--target", TARGET, "--token", LIVE_TOKEN,
+             "--publish", "--apply"]))
+        added = sorted(server.stored)
+        check(code == 2 and len(added) == 1 and "added item %s" % added[0]
+              in seen,
+              "--publish --apply adds one item and prints its id, and the "
+              "exit code is still the sweep's, 2 for two unread items")
+        made = server.stored[added[0]]
+        first_graph = json.loads(made["data"].decode("utf-8"))
+        check(made["owner"] == "gis_admin"
+              and made["type"] == "Code Attachment"
+              and made["tags"] == ["whobreaks", "whobreaks-" + TARGET]
+              and made["file"] == "whobreaks-graph-%s.json" % TARGET
+              and made["ctype"] == "application/json",
+              "the item belongs to the signed-in user, is a Code "
+              "Attachment with the two tags, and carries the file name the "
+              "target gives it")
+        check(first_graph["target"] == TARGET
+              and first_graph["complete"] is False
+              and len(first_graph["unread"]) == 2,
+              "its file is the graph of this sweep, edges and the unread "
+              "list included, so an incomplete sweep cannot look complete")
+        check("NOT COMPLETE" in made["description"],
+              "and the item's description says the sweep was not complete")
+        check(not any("share" in path for path in server.seen[before:]),
+              "no request shares the item: this tool never shares it  "
+              "<-- pinned defect")
+        check(LIVE_TOKEN not in seen and LIVE_TOKEN not in made["data"]
+              .decode("utf-8") and LIVE_TOKEN not in made["title"]
+              + made["description"],
+              "no credential reaches the console, the item's file, its title "
+              "or its description  <-- pinned defect")
+
+        # the next run replaces the same item, in place, from a password
+        mark = len(server.seen)
+        os.environ[SECRET_ENV] = PASSWORD
+        try:
+            code, seen = captured(lambda: main(
+                ["--url", WIDE_URL, "--target", TARGET, "--username",
+                 "gis_admin", "--publish", added[0].upper(), "--apply"]))
+        finally:
+            del os.environ[SECRET_ENV]
+        second_graph = json.loads(made["data"].decode("utf-8"))
+        check(code == 1 and "replaced item %s" % added[0] in seen
+              and sorted(server.stored) == added,
+              "--publish with the id replaces that item and adds no second "
+              "one, from a signed-in user and with the id in upper case")
+        check(second_graph["complete"] is True
+              and second_graph["url"] == WIDE_URL
+              and made["title"] == "whobreaks graph " + TARGET,
+              "and the file now holds the new sweep, which was complete")
+        check(not any(path.endswith("/addItem")
+                      for path in server.seen[mark:]),
+              "the replace never called addItem")
+
+        # an id that is not this tool's item is refused, and nothing is sent
+        keep = b"keep me"
+        for iid, owner, itype, tags in (
+                ("a1" * 16, "ann", "Code Attachment",
+                 ["whobreaks", "whobreaks-" + TARGET]),
+                ("a2" * 16, "gis_admin", "Web Map", ["whobreaks"]),
+                ("a3" * 16, "gis_admin", "Code Attachment",
+                 ["whobreaks", "whobreaks-" + OTHER])):
+            server.stored[iid] = {"id": iid, "owner": owner, "type": itype,
+                                  "tags": tags, "title": "t",
+                                  "access": "org", "data": keep,
+                                  "ctype": "text/plain"}
+        updates = len([p for p in server.seen if p.endswith("/update")])
+        for iid, want in (("a1" * 16, "another user"), ("a2" * 16, "Web Map"),
+                          ("a3" * 16, "published")):
+            message = fails(lambda: publish_graph(LIVE, LIVE_TOKEN,
+                                                  second_graph, iid),
+                            "%s is not overwritten  <-- pinned defect" % iid)
+            check(want in message and server.stored[iid]["data"] == keep,
+                  "and the refusal says why, and the item still holds its own "
+                  "file  <-- pinned defect")
+        check(len([p for p in server.seen if p.endswith("/update")])
+              == updates,
+              "no update request was sent for any of them  "
+              "<-- pinned defect")
+        code, seen = captured(lambda: main(
+            ["--url", WIDE_URL, "--target", TARGET, "--token", LIVE_TOKEN,
+             "--publish", "a2" * 16, "--apply"]))
+        check(code == 2 and "was not overwritten" in seen
+              and server.stored["a2" * 16]["data"] == keep,
+              "the same refusal through the command line is exit 2 with a "
+              "message, and the web map is untouched  <-- pinned defect")
+
+        # what the portal can do wrong
+        for mode, want in (("refuse", "Unable to add item"),
+                           ("failed", "did not accept"),
+                           ("noid", "did not accept"),
+                           ("corrupt", "different bytes")):
+            server.mode = mode
+            try:
+                message = fails(lambda: publish_graph(LIVE, LIVE_TOKEN,
+                                                      second_graph),
+                                "a portal that answers %s is a failure, not "
+                                "a published graph  <-- pinned defect" % mode)
+            finally:
+                server.mode = "ok"
+            check(want in message and LIVE_TOKEN not in message,
+                  "and the message says what happened without the token the "
+                  "portal echoed  <-- pinned defect")
+        check(any(kept["data"].endswith(b" ")
+                  for kept in server.stored.values()),
+              "the corrupt item was really stored, so the read-back is what "
+              "caught it")
+
+        pub_graph = os.path.join(workdir, "pub", "g.json")
+        server.mode = "refuse"
+        try:
+            code, seen = captured(lambda: main(
+                ["--url", WIDE_URL, "--target", TARGET, "--token",
+                 LIVE_TOKEN, "--graph", pub_graph, "--publish", "--apply"]))
+        finally:
+            server.mode = "ok"
+        check(code == 2 and "error:" in seen and LIVE_TOKEN not in seen
+              and os.path.isfile(pub_graph),
+              "a publish that fails ends the run on exit 2 and a message, "
+              "with the local graph already written and no token printed  "
+              "<-- pinned defect")
+
+        # who the token belongs to
+        server.who = {}
+        message = fails(lambda: community_user(LIVE, LIVE_TOKEN),
+                        "a token that names no user is refused")
+        check("no user name" in message, "and the refusal says so")
+        server.who = {"username": 5}
+        fails(lambda: community_user(LIVE, LIVE_TOKEN),
+              "and so is a user name that is not text")
+        server.who = {"username": "pat#1@example.org"}
+        try:
+            odd_id, _size = publish_graph(LIVE, LIVE_TOKEN, second_graph)
+        finally:
+            server.who = {"username": "gis_admin"}
+        check(server.stored[odd_id]["owner"] == "pat#1@example.org",
+              "a user name with a # and an @ is quoted into the path, or the # "
+              "ends the url there  <-- pinned defect")
+        fails(lambda: publish_graph(LIVE, "stale-token", second_graph),
+              "an expired token ends the publish before anything is sent")
+        fails(lambda: _call(LIVE, "content/users/gis_admin/addItem",
+                            {"token": "stale-token"}, post=True),
+              "and the portal itself refuses a bad token on addItem")
+        nowhere = fails(lambda: _call(LIVE, "content/nowhere", {}),
+                        "a REST path that is neither a search, an item nor a "
+                        "user's content raises")
+        check("unhandled content/nowhere" in nowhere, "and names that path")
+        fails(lambda: _call(LIVE, "content/users/gis_admin/items/%s/update"
+                            % ("9" * 32), {"token": LIVE_TOKEN}, post=True),
+              "an update of an item that does not exist is refused")
+
+        # usage errors, which never reach the portal
+        saved_token = dict((k, v) for k, v in os.environ.items()
+                           if k == TOKEN_ENV)
+        os.environ.pop(TOKEN_ENV, None)
+        try:
+            before = len(server.seen)
+            code, seen = captured(lambda: main(
+                ["--url", LIVE, "--target", TARGET, "--publish", "--apply"]))
+        finally:
+            os.environ.update(saved_token)
+        check(code == 64 and "--publish writes an item" in seen
+              and len(server.seen) == before,
+              "--publish with no token and no user is a usage error before "
+              "any request  <-- pinned defect")
+        code, seen = captured(lambda: main(
+            ["--url", LIVE, "--target", TARGET, "--token", LIVE_TOKEN,
+             "--publish", "Permits", "--apply"]))
+        check(code == 64 and "item id" in seen and len(server.seen) == before,
+              "--publish with something that is not an item id is refused "
+              "before any request  <-- pinned defect")
+        code, seen = captured(lambda: main(
+            ["--compare", graph_zero, graph_one, "--publish", "--apply"]))
+        check(code == 64 and "needs a sweep" in seen,
+              "--publish with two graph files is refused, because there is "
+              "no portal to publish to  <-- pinned defect")
+
+        # flags
+        check(_parse([]).publish is None and _parse(["--publish"]).publish == ""
+              and _parse(["--publish", TARGET]).publish == TARGET,
+              "--publish is off by default, bare adds, and with an id replaces")
+        refuses(["--url", PORTAL, "--target", TARGET, "--pub"],
+                "a unique prefix of --publish is refused, because it names a "
+                "write to the organization  <-- pinned defect")
+        refuses(["--url", PORTAL, "--target", TARGET, "--publi", TARGET],
+                "so is a longer prefix of it  <-- pinned defect")
     finally:
         server.shutdown()
         server.server_close()
@@ -4807,10 +5276,11 @@ def _parse(argv):
         prog="whobreaks.py",
         description="Report every item in an ArcGIS organization that "
                     "references the item you are about to delete.",
-        epilog="Read-only. No flag deletes, moves or edits anything in the "
-               "organization. --apply writes local files only. The "
-               "password is never a flag: export %s or answer the prompt."
-               % SECRET_ENV,
+        epilog="No flag deletes, moves or shares anything in the "
+               "organization. --apply writes local files, and with --publish "
+               "adds or replaces the file of one item of this tool's "
+               "own. The password is never a flag: export %s or answer the "
+               "prompt." % SECRET_ENV,
         allow_abbrev=False,
     )
     ap.add_argument("--url",
@@ -4850,6 +5320,12 @@ def _parse(argv):
                     help="file to write the dependency graph to as one static "
                          "html page, with --apply. With two --compare files it "
                          "is made offline from the second.")
+    ap.add_argument("--publish", nargs="?", const="", metavar="ITEMID",
+                    help="put the graph in the portal as one item, "
+                         "with --apply. With no id it adds the item and "
+                         "prints its id. With the id of an item this tool "
+                         "made for the same target it replaces that item's "
+                         "file. Needs a token or --username.")
     ap.add_argument("--compare", nargs="+", metavar="GRAPH",
                     help="print the edges added and removed since a graph "
                          "file. With one file, against this sweep. With two, "
@@ -4859,9 +5335,9 @@ def _parse(argv):
                          "portal behind an internal CA. Refused together with "
                          "--username.")
     ap.add_argument("--apply", action="store_true",
-                    help="write the --out, --graph and --dashboard files. "
-                         "Without this the sweep runs and prints, and nothing "
-                         "is written.")
+                    help="write the --out, --graph and --dashboard files, "
+                         "and make the --publish call. Without this the "
+                         "sweep runs and prints, and nothing is written.")
     ap.add_argument("--self-test", dest="self_test", action="store_true",
                     help="run the offline assertions and exit")
     try:
@@ -4949,6 +5425,10 @@ def _run(args):
                   "or pass one file to compare it with a new sweep.",
                   file=sys.stderr)
             return 64
+        if args.publish is not None:
+            print("error: --publish needs a sweep and a portal, and two graph "
+                  "files are compared offline.", file=sys.stderr)
+            return 64
         problem = args.dashboard and _dashboard_problem(args, args.compare)
         if problem:
             print("error: %s" % problem, file=sys.stderr)
@@ -4992,10 +5472,23 @@ def _run(args):
     except ValueError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 64
-    if args.apply and not (args.out or args.graph or args.dashboard):
-        print("error: --apply needs --out, --graph or --dashboard, the file "
-              "to write the report, the edge list or the page to.",
-              file=sys.stderr)
+    if args.apply and not (args.out or args.graph or args.dashboard
+                           or args.publish is not None):
+        print("error: --apply needs --out, --graph, --dashboard or --publish, "
+              "the file to write the report, the edge list or the page to, "
+              "or the portal item to publish the graph as.", file=sys.stderr)
+        return 64
+    if args.publish:
+        try:
+            args.publish = normalise_target(args.publish)
+        except ValueError as exc:
+            print("error: --publish takes the id of the item to replace, or "
+                  "nothing to add a new one. %s" % exc, file=sys.stderr)
+            return 64
+    if args.publish is not None and not (
+            args.token or args.username or os.environ.get(TOKEN_ENV)):
+        print("error: --publish writes an item owned by a user, so it needs "
+              "--token, %s or --username." % TOKEN_ENV, file=sys.stderr)
         return 64
     problem = _dashboard_problem(args, args.compare or ())
     if problem:
@@ -5118,6 +5611,24 @@ def _run(args):
                 # find no file, or last week's.
                 complain(scrub(exc))
                 return 2
+
+    if args.publish is not None:
+        print("")
+        if not args.apply:
+            print("Check only. Nothing was published. Re-run with --apply.")
+        else:
+            try:
+                made, size = publish_graph(args.url, token, graph,
+                                           args.publish or None,
+                                           args.insecure)
+            except RuntimeError as exc:
+                complain(scrub(exc))
+                return 2
+            if args.publish:
+                say("replaced item %s, %d bytes." % (made, size))
+            else:
+                say("added item %s, %d bytes. Pass --publish %s "
+                    "next time to replace it." % (made, size, made))
 
     return exit_code(report)
 

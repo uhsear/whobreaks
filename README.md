@@ -30,6 +30,12 @@ A graph in a file that nobody opens is not watched, and a break arrives one week
 `--dashboard` turns the graph into one static page, and `--compare` puts what changed since the
 earlier sweep on it. A scheduled sweep that replaces the file keeps a page on a screen current.
 
+A page on one workstation is still not where a team looks. `--publish` puts the graph in the
+portal as one item, and a scheduled sweep with `--publish <item id>` replaces that item's
+file each week, so its modified date and its contents move when the dependencies do. It is the
+only flag in this tool that writes to the organization, it needs `--apply`, and it refuses to
+overwrite any item that this tool did not make for the same target.
+
 A reference by service url is the other half. A dependency tool can resolve a url that it
 finds inside an item by requesting that url with the admin session. Then any item author can
 make the admin token call a server of their choosing. This tool reads the target item's own
@@ -234,6 +240,15 @@ PASS  a write that fails at the rename leaves the old page and no partial file  
 ...
 PASS  a title the console cannot encode is printed with a ? for each character, and the sweep still exits 1, because UnicodeEncodeError is a ValueError and used to make it exit 2  <-- pinned defect
 ...
+PASS  and an independent reader gets every value and the file bytes back, including a carriage return and a near boundary inside the file
+PASS  another user's item is refused as a place to put the graph  <-- pinned defect
+PASS  --publish without --apply sends no POST and adds no item  <-- pinned defect
+PASS  no request shares the item: this tool never shares it  <-- pinned defect
+PASS  no credential reaches the console, the item's file, its title or its description  <-- pinned defect
+PASS  a portal that answers corrupt is a failure, not a published graph  <-- pinned defect
+PASS  a user name with a # and an @ is quoted into the path, or the # ends the url there  <-- pinned defect
+PASS  a unique prefix of --publish is refused, because it names a write to the organization  <-- pinned defect
+...
 PASS  a title, a type, a target and a url that hold markup are escaped, so an item owner cannot put script on the page  <-- pinned defect
 ...
 PASS  a diff on the page marks an edge of an unread item unknown, and says why  <-- pinned defect
@@ -243,12 +258,18 @@ PASS  a prefix of --dashboard is refused, because it names a file the run will w
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-600 assertions, 0 failed
+653 assertions, 0 failed
 ```
 
-The full run prints all 600 assertions. It printed the same 600 lines on Windows under
-Python 3.13 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this block is
-cut.
+The full run prints all 653 assertions. It printed the same 653 lines on Windows under
+Python 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this
+block is cut.
+
+On the Linux host, about one run in thirty failed before this change and still does: a connection
+from the tool to the loopback stand-in did not complete, `faulthandler` showed the client stuck in
+`socket.create_connection` with the stand-in idle, and the run ended with a handful of failed
+assertions, never a wrong answer. The original code showed the same rate, 1 in 25. The cause was
+not found. A rerun was green each time. It was never seen on Windows.
 
 Measured with `python -m coverage run --branch whobreaks.py --self-test`, the self-test covers
 100% of the statements and 100% of the branches of the file. No line is excluded, and no line
@@ -258,7 +279,7 @@ needs a portal that the stand-in cannot play.
 
 Python 3.9 or newer. Standard library only: `urllib`, `json`, `csv`, `re`, `ssl`, `os`, `io`,
 `argparse`, `datetime`, `getpass`, `html`, `time`, and `http.server`, `threading`, `socket`, `tempfile`,
-`shutil` and `importlib` inside the self-test. It runs on ArcGIS Pro's Python and on a plain `python3`.
+`shutil`, `email` and `importlib` inside the self-test. It runs on ArcGIS Pro's Python and on a plain `python3`.
 `arcpy` is not used and the `arcgis` package is not needed.
 
 ```
@@ -271,7 +292,9 @@ at an organization. The matcher, the classifier and the traversal run over canne
 HTTP layer runs against a stand-in portal this tool starts on `127.0.0.1`: a real socket, a real
 sign-in POST, a real HTTP 500 on one item, real Experience Builder and StoryMap resources, a
 second organization for the transitive search and the service url, and the whole command line
-end to end. That includes the graph files and the diff between two of them.
+end to end. That includes the graph files and the diff between two of them, and the two calls that
+`--publish` makes, `addItem` and `update`, with a multipart upload that the stand-in reads back
+with the `email` package.
 
 ## Quick start
 
@@ -512,6 +535,101 @@ Sources for what the page relies on:
 - `<meta http-equiv="refresh" content="300">` reloads the page after that many seconds, and a
   short interval is an accessibility risk. https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/meta/http-equiv
 
+## Publishing the graph
+
+`--publish` puts the graph of the sweep in the portal as one item. It is the same document that
+`--graph` writes. It is sent only under `--apply`.
+
+```
+python whobreaks.py --url https://yourorg.maps.arcgis.com --target a1b2c3d4e5f60718293a4b5c6d7e8f90 \
+    --depth 3 --publish --apply
+```
+
+Run bare, it adds a new item and prints the id. Pass that id to the next run, and the run
+replaces the file of that item instead of adding another one. This is the self-test's own pair of
+runs against its two stand-in organizations. Only the end of each report is shown:
+
+```
+$ python whobreaks.py --url http://127.0.0.1:63274 --target a1b2c3d4e5f60718293a4b5c6d7e8f90 --token ... --publish
+...
+Do not read this run as permission to delete. It searched what it could read.
+
+Check only. Nothing was published. Re-run with --apply.
+
+$ python whobreaks.py --url http://127.0.0.1:63274 --target a1b2c3d4e5f60718293a4b5c6d7e8f90 --token ... --publish --apply
+...
+added item ab000000000000000000000000000001, 1639 bytes. Pass --publish ab000000000000000000000000000001 next time to replace it.
+
+$ python whobreaks.py --url http://127.0.0.1:63274/wide --target a1b2c3d4e5f60718293a4b5c6d7e8f90 --username gis_admin --publish ab000000000000000000000000000001 --apply
+...
+replaced item ab000000000000000000000000000001, 1570 bytes.
+
+$ python whobreaks.py --url http://127.0.0.1:63274/wide --target a1b2c3d4e5f60718293a4b5c6d7e8f90 --token ... --publish a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2 --apply
+...
+error: item a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2 was not overwritten: its type is Web Map, not Code Attachment
+```
+
+The first two runs exit 2 and the third exits 1. The third signs in with `--username`, and the
+password comes from `WHOBREAKS_PASSWORD`. Publishing does not change the exit code of the
+sweep, so a scheduled run still tells you whether something references the target. The fourth
+run exits 2, because a failed publish is an incomplete job. The item that the first `--apply`
+run made was this, on the stand-in: owned by the signed-in user, type `Code Attachment`,
+title `whobreaks graph a1b2...8f90` (ids shortened here), tags `whobreaks` and
+`whobreaks-a1b2...8f90`, and a file named `whobreaks-graph-a1b2...8f90.json`.
+
+What it does, and what the self-test checked about it:
+
+- **Nothing is sent without `--apply`.** Without it the run prints the line above, sends no POST
+  and adds no item. A prefix of the flag, such as `--pub`, is refused, as `--ap` is.
+- **It asks the portal who the token belongs to.** `community/self` gives the user name, which
+  goes into the `addItem` path, quoted. A name with a `#` in it would otherwise end the url there.
+  A token that names no user is refused. `--publish` with no token, no `--username` and no
+  `WHOBREAKS_TOKEN` is a usage error before any request.
+- **It never overwrites an item that is not its own.** Before an `update` it reads the item, and
+  it replaces the file only when the item is the signed-in user's, is a `Code Attachment`, and
+  carries both tags, `whobreaks` and `whobreaks-<target>`. The self-test points `--publish` at
+  another user's item, at a web map, and at a graph tagged for another target. It checks that each
+  is refused with its reason, that no update request was sent, and that the item still holds its
+  own file.
+- **It reads the item back.** The portal answers HTTP 200 with an error object, and a file item
+  can be written and still hold other bytes. After the call the tool reads the item's data and
+  compares it with what it sent. The self-test has the stand-in answer with an error, with
+  `success: false`, with no id and with a stored file that differs by one byte, and each is a
+  failure with exit 2. In the error case the portal echoes the token in its message and the
+  tool's message does not.
+- **It never shares the item.** `addItem` is sent with no sharing parameter, and the tool calls no
+  share operation. The self-test checks that no request path contains `share`. The Esri pages
+  above do not say what access a new item gets, and the stand-in does not model it, so look at
+  the item's sharing after the first run. Sharing it is a decision for its owner.
+- **The file carries no credential and no item title.** It is the graph file: ids, edge classes,
+  the portal url, the query, the target, and the flags and reasons that say how far to trust it. The description
+  of the item says `NOT COMPLETE` when the sweep was not.
+- **A failed publish does not lose the local files.** `--out`, `--graph` and `--dashboard` are
+  written first. If the publish then fails, the run exits 2 with the message.
+
+The page that `--dashboard` makes is not published. The Esri list of file types that can be added
+as items names no HTML file type, so the page stays a local file. A web server or a file share is
+the place for it.
+
+Sources for what `--publish` relies on. All of these pages were read for this change. The item type is
+the nearest documented one, and Limits says what is not proven:
+
+- Add Item: `POST .../content/users/<user>/addItem`, only `type` required, a `file` must be sent
+  as a multipart request, the response has `success`, `id` and `folder`, and a file name must be
+  unique in the user's folder. https://developers.arcgis.com/rest/users-groups-and-items/add-item/
+- Update Item: `POST .../content/users/<user>/items/<id>/update`, parameters not given are
+  unaffected, and the response has `success` and `id`.
+  https://developers.arcgis.com/rest/users-groups-and-items/update-item/
+- Self: `GET .../community/self` describes the user the token identifies, with its `username`.
+  https://developers.arcgis.com/rest/users-groups-and-items/self/
+- Item: `owner`, `type`, `tags` (an array of strings) and `access`, and Item Data, which streams
+  a file item's file with a content type derived from its MIME type.
+  https://developers.arcgis.com/rest/users-groups-and-items/item/ and
+  https://developers.arcgis.com/rest/users-groups-and-items/item-data/
+- Items and item types: "Code Attachment" is a file item. A generic JSON file is not an item type
+  there. https://developers.arcgis.com/rest/users-groups-and-items/items-and-item-types/
+- Supported items: lists no `.html` file type. https://doc.arcgis.com/en/arcgis-online/reference/supported-items.htm
+
 ## Usage
 
 | Flag | Default | What it does |
@@ -528,14 +646,16 @@ Sources for what the page relies on:
 | `--depth` | `1` | Follow hard breaks this many hops from the target. 1 lists the direct references only. |
 | `--graph` | none | File to write the edge list of the sweep to, as JSON. Needs `--apply`. |
 | `--dashboard` | none | File to write the dependency graph to as one static HTML page. Needs `--apply`. Made offline from the second file when `--compare` has two. Refused when it names the same file as `--out`, `--graph` or a `--compare` file. |
+| `--publish` | none | Put the graph in the portal as one `Code Attachment` item. Needs `--apply`, and a token or `--username`. With no value it adds an item and prints its id. With an item id it replaces the file of that item, and refuses an item that is not this user's, not a `Code Attachment`, or not tagged for this target. Not allowed with two `--compare` files. |
 | `--compare` | none | One graph file: print the edges added and removed since it. Two graph files: compare them offline, with no `--url`. |
 | `--insecure` | off | Skip TLS verification, for an Enterprise portal behind an internal CA. Refused together with `--username`. |
-| `--apply` | off | Write the `--out` report, the `--graph` file and the `--dashboard` page. Without it nothing is written. |
+| `--apply` | off | Write the `--out` report, the `--graph` file and the `--dashboard` page, and make the `--publish` calls. Without it nothing is written and nothing is sent. |
 | `--self-test` | off | Run the offline assertions and exit. |
 
-`--apply` writes local files only: the report, the edge list and the page. It does not change the
-organization, and there is no flag that does. Every parser option is spelled out in full, because
-`allow_abbrev` is off: a prefix such as `--ap` or `--dash` is refused and exits 64. The password is never a flag either: `argv` is readable by every process on the
+`--apply` writes the report, the edge list and the page to local files. With `--publish` it also adds
+one item to the organization, or replaces the file of an item that this tool made. There
+is no flag that deletes, moves or shares anything. Every parser option is spelled out in full,
+because `allow_abbrev` is off: a prefix such as `--ap`, `--dash` or `--pub` is refused and exits 64. The password is never a flag either: `argv` is readable by every process on the
 machine, and the self-test asserts that no `--password` attribute exists at all. A password is
 never posted over plain `http://` either. The one exception is the loopback address, which the
 self-test uses.
@@ -627,8 +747,8 @@ It refuses, or reports as unknown, rather than guessing:
 |---|---|
 | 0 | nothing in the organization references the target, and every item was enumerated and read |
 | 1 | something references it, listed worst first |
-| 2 | the sweep could not be completed, so nothing can be concluded. An item was unreadable or read in part, the target item itself was unreadable, a search slice sat on the 10,000 ceiling, or a search page held a result with no usable id. Also when `--apply` could not write a file it was asked for, the page included, and when the tool met a failure it did not foresee |
-| 64 | usage error, including a flag that is unknown or has a bad value, a graph file that is missing, is not a graph, or covers a different scope, and an `--out`, `--graph` or `--dashboard` that is a folder or that names one file twice, and a `--dashboard` that names a graph file the run reads |
+| 2 | the sweep could not be completed, so nothing can be concluded. An item was unreadable or read in part, the target item itself was unreadable, a search slice sat on the 10,000 ceiling, or a search page held a result with no usable id. Also when `--apply` could not write a file it was asked for, the page included, when `--publish` was refused or could not be confirmed by reading the item back, and when the tool met a failure it did not foresee |
+| 64 | usage error, including a flag that is unknown or has a bad value, a graph file that is missing, is not a graph, or covers a different scope, and an `--out`, `--graph` or `--dashboard` that is a folder or that names one file twice, and a `--dashboard` that names a graph file the run reads. Also a `--publish` with no token, with a value that is not an item id, or with two `--compare` files |
 
 `--depth` and a one-file `--compare` do not change the exit code of the sweep. A two-file
 `--compare` exits 0 when no edge changed and 1 when an edge did. It exits 2 when either graph is
@@ -664,6 +784,9 @@ the item it `loads`. Every JSON report names the `service_url` it searched for, 
 
 The `--dashboard` page holds the same edges as the `--graph` file, with the title and type of each
 item when it comes from a sweep. See "Watching the graph" above.
+
+The item that `--publish` makes holds the same document as the `--graph` file, with its keys in
+order. See "Publishing the graph" above.
 
 The `--graph` file holds `edges`, each with `from`, `to` and `kind`, sorted by `from` and then
 `to`. The flags are next to them: `complete`, `unread` (the ids of the items that could not be
@@ -732,6 +855,26 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   fail with an error it raises itself, not with a real viewer holding the file.
 - It does not delete, re-point or unshare anything. Repointing what it finds is `agol-relink`'s
   job.
+- `--publish` was run only against the stand-in portal in the self-test. The REST pages above
+  describe the calls and the response shape, and the stand-in answers in that shape. No real
+  ArcGIS Online or Enterprise portal was asked to take the file.
+- The type `Code Attachment` is the nearest documented file item, and its page names no file
+  extension. A portal may refuse a `.json` file for it, or hold it under another type. If it does,
+  the response is an error, the run exits 2 and the item is not made. If a portal accepts the
+  upload and serves other bytes, the read-back catches it and the run exits 2, but the item it
+  made stays in the portal, and the message names its id.
+- The Update Item page does not say in words that a new file replaces the old one. It says that
+  parameters not given are unaffected. The read-back is what checks it, and it was only checked
+  against the stand-in.
+- The read-back reads at most the size of the file, plus one byte. A portal that serves
+  different bytes for any reason, such as a re-encoded file, is a failure here, not a pass.
+- The item is a point-in-time copy. It does not hold the diff that `--compare` prints, and the
+  tool keeps no series of weeks.
+- The graph holds item ids and the portal url, and no titles. It still shows which items load
+  which. Whoever can open the item sees which items load which, so share it as carefully as the
+  content map it is made from.
+- The publish uses the token's own user. An administrator who wants the item under another
+  account signs in as that account.
 - Group membership, folder structure and sharing are out of scope. This tool answers one
   question: what would break.
 
@@ -756,6 +899,10 @@ Other single-file tools in this portfolio that pair with this one:
 - [agol-relink](https://github.com/uhsear/agol-relink) - repoint the references this finds, instead of deleting
 - [stalehost](https://github.com/uhsear/stalehost) - the whole-token rule that the service url match follows, applied to a retired host name on disk
 - [deadwidget](https://github.com/uhsear/deadwidget) - the finer grain inside one Experience Builder app: widgets bound to a layer or sublayer id that no longer exists
+
+`phaakma/arcgis_item_graph` is described on GitHub as "ArcGIS Item Dependency Graphs". It was
+found by `gh search repos` for this change and was not run or read, so nothing here compares
+against it. Esri's own Item Graph is named at the top of this file.
 
 A different project of the same name, `f1729/whobreaks`, does impact analysis on source code for AI
 coding tools. It does not read ArcGIS items.
