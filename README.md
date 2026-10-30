@@ -32,9 +32,10 @@ earlier sweep on it. A scheduled sweep that replaces the file keeps a page on a 
 
 A page on one workstation is still not where a team looks. `--publish` puts the graph in the
 portal as one item, and a scheduled sweep with `--publish <item id>` replaces that item's
-file each week, so its modified date and its contents move when the dependencies do. It is the
+file each week, so its contents move when the dependencies do. It is the
 only flag in this tool that writes to the organization, it needs `--apply`, and it refuses to
-overwrite any item that this tool did not make for the same target.
+overwrite any item that this tool did not make for the same target. The next sweep does not
+count that item as a reference: it recognises its own graph, leaves it out and says so.
 
 A reference by service url is the other half. A dependency tool can resolve a url that it
 finds inside an item by requesting that url with the admin session. Then any item author can
@@ -301,30 +302,33 @@ with the `email` package.
 ```
 export WHOBREAKS_PASSWORD='...'
 python whobreaks.py --url https://yourorg.maps.arcgis.com --target a1b2c3d4e5f60718293a4b5c6d7e8f90 \
-    --username gis_admin
+    --username pubadmin
 ```
 
 A scheduled run that already holds a token sets `WHOBREAKS_TOKEN` instead of passing `--token`,
 because other processes on the machine can read the command line.
 
-This is the self-test's own run against its first stand-in organization, on the loopback port
-that run happened to get, and on a console with the Windows code page:
+This is the output of a command that the self-test runs against its first stand-in organization,
+on the loopback port that run happened to get, and on a console with the Windows code page. The
+self-test itself prints PASS lines only. This text was captured by wrapping `main()` in a copy of
+the file while the self-test ran, so the commands are the self-test's own but the capture
+script is not in this repository. Ports, timestamps and byte counts change on every run:
 
 ```
 $ python whobreaks.py --url http://127.0.0.1:62206 --target a1b2c3d4e5f60718293a4b5c6d7e8f90 --token ...
 reading http://127.0.0.1:62206
 target: a1b2c3d4e5f60718293a4b5c6d7e8f90
 query: orgid:REALORG
-service url: 127.0.0.1:62206/arcgis/rest/services/permits/featureserver
+service url: 127.0.0.1:62206/arcgis/rest/services/sites/featureserver
   11 item(s) from (orgid:REALORG) AND created:[0 TO 1790550925170]
 searching the configuration of 11 item(s)
   HARD BREAK 0b000000000000000000000000000000 (Nightly refresh)
-  HARD BREAK 5a000000000000000000000000000000 (How permits work)
+  HARD BREAK 5a000000000000000000000000000000 (How sites work)
   MENTION ONLY 7e000000000000000000000000000000 (refresh.py)
-  SOFT BREAK ac000000000000000000000000000000 (Permit map)
-  HARD BREAK da000000000000000000000000000000 (Permit board ??)
+  SOFT BREAK ac000000000000000000000000000000 (Site map)
+  HARD BREAK da000000000000000000000000000000 (Site board ??)
   MENTION ONLY dc000000000000000000000000000000 (Archive notes)
-  HARD BREAK eb000000000000000000000000000000 (Permit finder)
+  HARD BREAK eb000000000000000000000000000000 (Site finder)
 
 7 item(s) reference a1b2c3d4e5f60718293a4b5c6d7e8f90
 
@@ -333,20 +337,20 @@ HARD BREAK   0b000000000000000000000000000000  Nightly refresh [Notebook]
              lyr = gis.content.get('a1b2c3d4e5f60718293a4b5c6d7e8f90')
              data: cells/markdown/source (x1)
              The source layer used to be a1b2c3d4e5f60718293a4b5c6d7e8f90.
-HARD BREAK   5a000000000000000000000000000000  How permits work [StoryMap]
+HARD BREAK   5a000000000000000000000000000000  How sites work [StoryMap]
              resources/draft_x.json: nodes/n-x1/data/itemId (x1)
              a1b2c3d4e5f60718293a4b5c6d7e8f90
              resources/draft_x.json: resources/r-1/data/itemId (x1)
              a1b2c3d4e5f60718293a4b5c6d7e8f90
-HARD BREAK   da000000000000000000000000000000  Permit board ?? [Dashboard]
+HARD BREAK   da000000000000000000000000000000  Site board ?? [Dashboard]
              data: datasets/dataSource/itemId (x1)
              a1b2c3d4e5f60718293a4b5c6d7e8f90
-HARD BREAK   eb000000000000000000000000000000  Permit finder [Web Experience]
+HARD BREAK   eb000000000000000000000000000000  Site finder [Web Experience]
              resources/config.json: dataSources/dataSource_1/itemId (x1)
              a1b2c3d4e5f60718293a4b5c6d7e8f90
              resources/config.json: widgets/widget_1/useDataSources/dataSourceId (x1)
              dataSource_1-a1b2c3d4e5f60718293a4b5c6d7e8f90-0
-SOFT BREAK   ac000000000000000000000000000000  Permit map [Web Map]
+SOFT BREAK   ac000000000000000000000000000000  Site map [Web Map]
              data: bookmarks/name (x1)
              site a1b2c3d4e5f60718293a4b5c6d7e8f90
              data: operationalLayers/layerDefinition/definitionExpression (x1)
@@ -363,7 +367,7 @@ MENTION ONLY dc000000000000000000000000000000  Archive notes [Document Link]
 4 hard, 1 soft, 2 mention only, over 10 item(s) searched
 
 2 item(s) COULD NOT BE READ, so they are not clean, they are unknown:
-  b1000000000000000000000000000000 Parcel delivery: 33554433 byte item was not fetched, over the 33554432 byte limit, so its configuration was never searched
+  b1000000000000000000000000000000 Plot delivery: 33554433 byte item was not fetched, over the 33554432 byte limit, so its configuration was never searched
   de000000000000000000000000000000 Locked report: data: http://127.0.0.1:62206/sharing/rest/content/items/de000000000000000000000000000000/data: HTTP Error 500: Internal Server Error
 
 Do not read this run as permission to delete. It searched what it could read.
@@ -379,8 +383,9 @@ and one answered HTTP 500, and an item nobody read is not an item known to be cl
 
 ## Following the break further
 
-`--depth` follows hard breaks past the first hop. This is the self-test's own run against its
-second stand-in organization, on the loopback port that run happened to get:
+`--depth` follows hard breaks past the first hop. This is the captured output of a command the
+self-test runs against its second stand-in organization, on the loopback port that run
+happened to get:
 
 ```
 $ python whobreaks.py --url http://127.0.0.1:62206/wide --target a1b2c3d4e5f60718293a4b5c6d7e8f90 \
@@ -388,34 +393,34 @@ $ python whobreaks.py --url http://127.0.0.1:62206/wide --target a1b2c3d4e5f6071
 reading http://127.0.0.1:62206/wide
 target: a1b2c3d4e5f60718293a4b5c6d7e8f90
 query: orgid:REALORG
-service url: 127.0.0.1:62206/arcgis/rest/services/permits/featureserver
+service url: 127.0.0.1:62206/arcgis/rest/services/sites/featureserver
   8 item(s) from (orgid:REALORG) AND created:[0 TO 1790550924637]
 searching the configuration of 8 item(s)
-  HARD BREAK f1000000000000000000000000000000 (Permit layers)
-  MENTION ONLY f5000000000000000000000000000000 (Permit handbook)
-  SOFT BREAK f7000000000000000000000000000000 (Permit filter board)
+  HARD BREAK f1000000000000000000000000000000 (Site layers)
+  MENTION ONLY f5000000000000000000000000000000 (Site handbook)
+  SOFT BREAK f7000000000000000000000000000000 (Site filter board)
 
 3 item(s) reference a1b2c3d4e5f60718293a4b5c6d7e8f90
 
-HARD BREAK   f1000000000000000000000000000000  Permit layers [Web Map]
+HARD BREAK   f1000000000000000000000000000000  Site layers [Web Map]
              data: operationalLayers/url (x1)
-             http://127.0.0.1:62206/arcgis/rest/services/Permits/FeatureServer/0
-SOFT BREAK   f7000000000000000000000000000000  Permit filter board [Dashboard]
+             http://127.0.0.1:62206/arcgis/rest/services/Sites/FeatureServer/0
+SOFT BREAK   f7000000000000000000000000000000  Site filter board [Dashboard]
              data: datasets/filter (x1)
-             PERMIT_SRC = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
-MENTION ONLY f5000000000000000000000000000000  Permit handbook [StoryMap]
+             SITE_SRC = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
+MENTION ONLY f5000000000000000000000000000000  Site handbook [StoryMap]
              metadata: description (x1)
              explains a1b2c3d4e5f60718293a4b5c6d7e8f90
 
 1 hard, 1 soft, 1 mention only, over 7 item(s) searched
 
 3 more item(s) break through a hard break, to depth 3:
-HOP 2        f2000000000000000000000000000000  Permit viewer [Web Mapping Application]
-             loads f1000000000000000000000000000000 (Permit layers), first hop f1000000000000000000000000000000
-HOP 2        f7000000000000000000000000000000  Permit filter board [Dashboard]
-             loads f1000000000000000000000000000000 (Permit layers), first hop f1000000000000000000000000000000
-HOP 3        f3000000000000000000000000000000  Permit site [Hub Site Application]
-             loads f2000000000000000000000000000000 (Permit viewer), first hop f1000000000000000000000000000000
+HOP 2        f2000000000000000000000000000000  Site viewer [Web Mapping Application]
+             loads f1000000000000000000000000000000 (Site layers), first hop f1000000000000000000000000000000
+HOP 2        f7000000000000000000000000000000  Site filter board [Dashboard]
+             loads f1000000000000000000000000000000 (Site layers), first hop f1000000000000000000000000000000
+HOP 3        f3000000000000000000000000000000  Home site [Hub Site Application]
+             loads f2000000000000000000000000000000 (Site viewer), first hop f1000000000000000000000000000000
 ```
 
 The web map names the target only by its service url, and it is still a hard break. Its second
@@ -423,7 +428,7 @@ layer points at another url on the same server. The stand-in portal logged no re
 either url.
 
 The filter board only filters on the target, which is a soft break. It also loads the web map,
-so it breaks at hop 2 all the same. Two items are left out of the hop list on purpose. Permit
+so it breaks at hop 2 all the same. Two items are left out of the hop list on purpose. Site
 notes names the web map in its description, and Handbook board embeds a story that only names
 the target. A search that followed every edge would list both of them.
 
@@ -436,7 +441,7 @@ so. Without `--depth` the report is the one above, line for line, with no hop se
 `--apply --graph week2.json` writes every edge of the sweep, with the flags that say how far to
 trust it. `--compare` prints what changed since an earlier graph. With one file, it compares
 that file with the sweep it runs. With two files, it runs offline and makes no request at all.
-This is the self-test's run over two graphs of its second organization:
+This is the captured output of the self-test's runs over two graphs of its second organization:
 
 ```
 $ python whobreaks.py --compare week0.json graphs/week1.json
@@ -474,13 +479,13 @@ Complete: every item was enumerated and read.
 edges | 8: 5 hard, 1 soft, 2 mention
 Breaks if the target is deleted, to depth 3
 hop | item | title | type | loads
-1 | f1000000000000000000000000000000 | Permit layers | Web Map | a1b2c3d4e5f60718293a4b5c6d7e8f90
-2 | f2000000000000000000000000000000 | Permit viewer | Web Mapping Application | f1000000000000000000000000000000
-2 | f7000000000000000000000000000000 | Permit filter board | Dashboard | f1000000000000000000000000000000
-3 | f3000000000000000000000000000000 | Permit site | Hub Site Application | f2000000000000000000000000000000
+1 | f1000000000000000000000000000000 | Site layers | Web Map | a1b2c3d4e5f60718293a4b5c6d7e8f90
+2 | f2000000000000000000000000000000 | Site viewer | Web Mapping Application | f1000000000000000000000000000000
+2 | f7000000000000000000000000000000 | Site filter board | Dashboard | f1000000000000000000000000000000
+3 | f3000000000000000000000000000000 | Home site | Hub Site Application | f2000000000000000000000000000000
 Reference the target without breaking
-SOFT BREAK | f7000000000000000000000000000000 | Permit filter board | Dashboard
-MENTION ONLY | f5000000000000000000000000000000 | Permit handbook | StoryMap
+SOFT BREAK | f7000000000000000000000000000000 | Site filter board | Dashboard
+MENTION ONLY | f5000000000000000000000000000000 | Site handbook | StoryMap
 Changed since the graph taken 2026-09-20T14:00:00Z
 added | HARD BREAK | f3000000000000000000000000000000 | f2000000000000000000000000000000
 removed | HARD BREAK | f4000000000000000000000000000000 | f2000000000000000000000000000000
@@ -546,8 +551,8 @@ python whobreaks.py --url https://yourorg.maps.arcgis.com --target a1b2c3d4e5f60
 ```
 
 Run bare, it adds a new item and prints the id. Pass that id to the next run, and the run
-replaces the file of that item instead of adding another one. This is the self-test's own pair of
-runs against its two stand-in organizations. Only the end of each report is shown:
+replaces the file of that item instead of adding another one. This is the captured output of the
+self-test's own runs against its two stand-in organizations. Only the end of each report is shown:
 
 ```
 $ python whobreaks.py --url http://127.0.0.1:63274 --target a1b2c3d4e5f60718293a4b5c6d7e8f90 --token ... --publish
@@ -560,7 +565,7 @@ $ python whobreaks.py --url http://127.0.0.1:63274 --target a1b2c3d4e5f60718293a
 ...
 added item ab000000000000000000000000000001, 1639 bytes. Pass --publish ab000000000000000000000000000001 next time to replace it.
 
-$ python whobreaks.py --url http://127.0.0.1:63274/wide --target a1b2c3d4e5f60718293a4b5c6d7e8f90 --username gis_admin --publish ab000000000000000000000000000001 --apply
+$ python whobreaks.py --url http://127.0.0.1:63274/wide --target a1b2c3d4e5f60718293a4b5c6d7e8f90 --username pubadmin --publish ab000000000000000000000000000001 --apply
 ...
 replaced item ab000000000000000000000000000001, 1570 bytes.
 
@@ -571,16 +576,24 @@ error: item a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2 was not overwritten: its type is We
 
 The first two runs exit 2 and the third exits 1. The third signs in with `--username`, and the
 password comes from `WHOBREAKS_PASSWORD`. Publishing does not change the exit code of the
-sweep, so a scheduled run still tells you whether something references the target. The fourth
-run exits 2, because a failed publish is an incomplete job. The item that the first `--apply`
-run made was this, on the stand-in: owned by the signed-in user, type `Code Attachment`,
-title `whobreaks graph a1b2...8f90` (ids shortened here), tags `whobreaks` and
-`whobreaks-a1b2...8f90`, and a file named `whobreaks-graph-a1b2...8f90.json`.
+sweep. The next sweep of the same organization finds the published graph in the search. Its
+title, description and file all name the target, so it would be read as a mention and a
+scheduled run would exit 1 for ever. The sweep leaves it out instead, when four things hold:
+its type is `Code Attachment`, it carries both tags, it was read without a problem, and its file
+is a graph of this same target. It then prints `not searched, because each is the graph this tool
+published for the target` and the id, so the omission is visible. An item that only borrows the
+tag and the type is still searched. The fourth run exits 2, because a failed publish is an
+incomplete job. The item that the first `--apply` run made was this, on the stand-in: owned by
+the signed-in user, type `Code Attachment`, type keyword `Desktop`, title
+`whobreaks graph a1b2...8f90` (ids shortened here), tags `whobreaks` and `whobreaks-a1b2...8f90`,
+and a file named `whobreaks-graph-a1b2...8f90.json`.
 
 What it does, and what the self-test checked about it:
 
-- **Nothing is sent without `--apply`.** Without it the run prints the line above, sends no POST
-  and adds no item. A prefix of the flag, such as `--pub`, is refused, as `--ap` is.
+- **Nothing is written without `--apply`.** Without it the run prints the line above, sends no POST
+  and adds no item. The sweep itself still sends read requests (`portals/self`, the search, the
+  target item, and each item's `data` and `resources`), and `--username` still posts the password
+  to `generateToken`. A prefix of the flag, such as `--pub`, is refused, as `--ap` is.
 - **It asks the portal who the token belongs to.** `community/self` gives the user name, which
   goes into the `addItem` path, quoted. A name with a `#` in it would otherwise end the url there.
   A token that names no user is refused. `--publish` with no token, no `--username` and no
@@ -598,9 +611,19 @@ What it does, and what the self-test checked about it:
   failure with exit 2. In the error case the portal echoes the token in its message and the
   tool's message does not.
 - **It never shares the item.** `addItem` is sent with no sharing parameter, and the tool calls no
-  share operation. The self-test checks that no request path contains `share`. The Esri pages
-  above do not say what access a new item gets, and the stand-in does not model it, so look at
-  the item's sharing after the first run. Sharing it is a decision for its owner.
+  share operation. The self-test checks that no request path contains `share`. The Add Item page
+  says: "The item is flagged as private by default, and will not be shared with any group. This
+  can be changed using the Share Item operation." So a new item is private to its owner until the
+  owner shares it, and that is the owner's decision. The stand-in records `access` as
+  `private`, as that page says, but it was not asked what a real portal does.
+- **It sends the type keyword its item type needs.** The Items and item types page lists
+  `Code Attachment` with a required keyword: one of Web Mapping Application, Explorer, Desktop,
+  Mobile or iPhone, and for a Web Mapping Application one more of JavaScript, Flex or Silverlight.
+  `addItem` sends `typeKeywords=Desktop`, the one that asks for nothing further, and the stand-in
+  refuses a `Code Attachment` without one of the five, with exit 2 from the tool. The `update`
+  call sends neither the type nor the keywords, because an update must not change them. No real
+  portal has accepted this item, so whether `Desktop` is the keyword a portal expects for a JSON
+  file is not proven.
 - **The file carries no credential and no item title.** It is the graph file: ids, edge classes,
   the portal url, the query, the target, and the flags and reasons that say how far to trust it. The description
   of the item says `NOT COMPLETE` when the sweep was not.
@@ -615,8 +638,8 @@ Sources for what `--publish` relies on. All of these pages were read for this ch
 the nearest documented one, and Limits says what is not proven:
 
 - Add Item: `POST .../content/users/<user>/addItem`, only `type` required, a `file` must be sent
-  as a multipart request, the response has `success`, `id` and `folder`, and a file name must be
-  unique in the user's folder. https://developers.arcgis.com/rest/users-groups-and-items/add-item/
+  as a multipart request, the response has `success`, `id` and `folder`, a file name must be
+  unique in the user's folder, and the new item is flagged private by default. https://developers.arcgis.com/rest/users-groups-and-items/add-item/
 - Update Item: `POST .../content/users/<user>/items/<id>/update`, parameters not given are
   unaffected, and the response has `success` and `id`.
   https://developers.arcgis.com/rest/users-groups-and-items/update-item/
@@ -626,8 +649,10 @@ the nearest documented one, and Limits says what is not proven:
   a file item's file with a content type derived from its MIME type.
   https://developers.arcgis.com/rest/users-groups-and-items/item/ and
   https://developers.arcgis.com/rest/users-groups-and-items/item-data/
-- Items and item types: "Code Attachment" is a file item. A generic JSON file is not an item type
-  there. https://developers.arcgis.com/rest/users-groups-and-items/items-and-item-types/
+- Items and item types: "Code Attachment" is a file item, described as "the sample code
+  associated with a code sample application", and its keywords are required, as listed above. A
+  generic JSON file is not an item type there.
+  https://developers.arcgis.com/rest/users-groups-and-items/items-and-item-types/
 - Supported items: lists no `.html` file type. https://doc.arcgis.com/en/arcgis-online/reference/supported-items.htm
 
 ## Usage
@@ -636,7 +661,7 @@ the nearest documented one, and Limits says what is not proven:
 |---|---|---|
 | `--url` | none | Portal url. Required. Must start with `https://` or `http://`, and must carry no user name, password, query string or fragment. |
 | `--target` | none | The item id you are about to delete. Required, and 32 hexadecimal characters. |
-| `--query` | the signed-in org | Search query to sweep. The created-date slices are ANDed onto it. |
+| `--query` | the signed-in org | Search query to sweep. The created-date slices are ANDed onto it. A sweep with a `--query` that finds nothing exits 2, not 0, because the tool cannot tell a query that covers the organization from one that leaves the referencing item out. |
 | `--token` | none | An existing portal token. Other processes can read it on the command line, so a scheduled run sets `WHOBREAKS_TOKEN` instead. |
 | `--username` | none | Sign in as this user. The password comes from `WHOBREAKS_PASSWORD` or an unechoed prompt. Refused with an `http://` url, except on this machine's loopback address. |
 | `--out` | none | File to write the report to. |
@@ -649,7 +674,7 @@ the nearest documented one, and Limits says what is not proven:
 | `--publish` | none | Put the graph in the portal as one `Code Attachment` item. Needs `--apply`, and a token or `--username`. With no value it adds an item and prints its id. With an item id it replaces the file of that item, and refuses an item that is not this user's, not a `Code Attachment`, or not tagged for this target. Not allowed with two `--compare` files. |
 | `--compare` | none | One graph file: print the edges added and removed since it. Two graph files: compare them offline, with no `--url`. |
 | `--insecure` | off | Skip TLS verification, for an Enterprise portal behind an internal CA. Refused together with `--username`. |
-| `--apply` | off | Write the `--out` report, the `--graph` file and the `--dashboard` page, and make the `--publish` calls. Without it nothing is written and nothing is sent. |
+| `--apply` | off | Write the `--out` report, the `--graph` file and the `--dashboard` page, and make the `--publish` calls. Without it nothing is written. The sweep still sends its read requests, and `--username` still posts the password to `generateToken`. |
 | `--self-test` | off | Run the offline assertions and exit. |
 
 `--apply` writes the report, the edge list and the page to local files. With `--publish` it also adds
@@ -745,9 +770,9 @@ It refuses, or reports as unknown, rather than guessing:
 
 | Code | Means |
 |---|---|
-| 0 | nothing in the organization references the target, and every item was enumerated and read |
+| 0 | nothing references the target, every item was enumerated and read, a credential was sent, no `--query` was given, and the target itself was among the items searched. The last three are the conditions under which an empty result means an empty organization |
 | 1 | something references it, listed worst first |
-| 2 | the sweep could not be completed, so nothing can be concluded. An item was unreadable or read in part, the target item itself was unreadable, a search slice sat on the 10,000 ceiling, or a search page held a result with no usable id. Also when `--apply` could not write a file it was asked for, the page included, when `--publish` was refused or could not be confirmed by reading the item back, and when the tool met a failure it did not foresee |
+| 2 | the sweep could not be completed, so nothing can be concluded. Also an empty result with no token, with a `--query`, or with a target that was not among the items searched. An item was unreadable or read in part, the target item itself was unreadable, a search slice sat on the 10,000 ceiling, or a search page held a result with no usable id. Also when `--apply` could not write a file it was asked for, the page included, when `--publish` was refused or could not be confirmed by reading the item back, and when the tool met a failure it did not foresee |
 | 64 | usage error, including a flag that is unknown or has a bad value, a graph file that is missing, is not a graph, or covers a different scope, and an `--out`, `--graph` or `--dashboard` that is a folder or that names one file twice, and a `--dashboard` that names a graph file the run reads. Also a `--publish` with no token, with a value that is not an item id, or with two `--compare` files |
 
 `--depth` and a one-file `--compare` do not change the exit code of the sweep. A two-file
@@ -758,6 +783,22 @@ loads it.
 
 Exit 2 beats exit 1 on purpose. Somebody who sees 1 goes and looks at the items. Somebody who
 sees 0 deletes the item, so 0 has to mean the sweep was complete, not that it finished.
+
+Three more conditions block exit 0 and nothing else. A sweep with no token sees only public
+items, so a private app that uses a public service would not be seen. A sweep with a `--query`
+covers only what the query matches, and the tool cannot tell a query that names the whole
+organization from one that leaves the referencing item out. A sweep whose items do not include
+the target itself has been pointed at the wrong place or cannot see where the target lives. In
+each case an empty result exits 2 and the output lists the reason. A reference that was found
+still exits 1, because it is true whatever else was missed. The same reasons are in the `caveats`
+list of the `--out` document. The `--graph` file and the dashboard's "Complete" banner say
+whether every item was enumerated and read, which is a different question, so they do not carry
+them. Leave out `--query` and sign in to get exit 0.
+
+A token does not make the sweep complete either. A non-administrator token covers what that user
+can search, and the tool cannot see the difference, so an empty result for such a token is exit 0
+and is only as good as the account's view of the organization. Use an administrator's token for
+a sweep that gates a delete.
 
 ## Output
 

@@ -19,13 +19,13 @@ sorts each hit into a class, leaves thumbnails out, and never opens a url it
 finds inside an item.
 
     python whobreaks.py --self-test
-    python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --username gis_admin
-    python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --token TOKEN --out breaks.csv --format csv --apply
-    python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --token TOKEN --depth 3 --graph week2.json --apply
-    python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --token TOKEN --depth 3 --graph week2.json --dashboard board.html --compare week1.json --apply
+    python whobreaks.py --url https://yourorg.maps.arcgis.com --target ITEMID --username pubadmin
+    python whobreaks.py --url https://yourorg.maps.arcgis.com --target ITEMID --token TOKEN --out breaks.csv --format csv --apply
+    python whobreaks.py --url https://yourorg.maps.arcgis.com --target ITEMID --token TOKEN --depth 3 --graph week2.json --apply
+    python whobreaks.py --url https://yourorg.maps.arcgis.com --target ITEMID --token TOKEN --depth 3 --graph week2.json --dashboard board.html --compare week1.json --apply
     python whobreaks.py --compare week1.json week2.json --dashboard board.html --apply
-    python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --token TOKEN --publish --apply
-    python whobreaks.py --url https://county.maps.arcgis.com --target ITEMID --token TOKEN --publish GRAPHITEMID --apply
+    python whobreaks.py --url https://yourorg.maps.arcgis.com --target ITEMID --token TOKEN --publish --apply
+    python whobreaks.py --url https://yourorg.maps.arcgis.com --target ITEMID --token TOKEN --publish GRAPHITEMID --apply
 
 --depth follows HARD breaks past the first hop, offline, over the references
 the same sweep recorded between every pair of items. The target's own service
@@ -131,6 +131,15 @@ DASH_REFRESH_S = 300
 # file for it. The tag is what lets --publish refuse to overwrite any other item.
 PUBLISH_TYPE = "Code Attachment"
 PUBLISH_TAG = "whobreaks"
+# The Esri item types page says a Code Attachment needs one type keyword of
+# Web Mapping Application, Explorer, Desktop, Mobile or iPhone, and for a Web
+# Mapping Application one more of JavaScript, Flex or Silverlight. Desktop is
+# the one that asks for nothing further. The stand-in portal refuses an
+# addItem of this type without one of them, the way the page says a portal
+# should. No real portal has been asked.
+PUBLISH_KEYWORD = "Desktop"
+PUBLISH_KEYWORDS = frozenset(("Web Mapping Application", "Explorer",
+                              "Desktop", "Mobile", "iPhone"))
 
 # Hosts a password may be posted to over plain http: the self-test's stand-in
 # portal. Anywhere else, http would put the password on the wire in clear.
@@ -218,15 +227,28 @@ URL_RIGHT = ALNUM | frozenset("-_")
 # Anything shaped like a credential in a url or a config value. Excerpts of
 # item configuration go into the report and onto the screen, and a secured
 # service url carries a token in its query string. The key may follow an
-# underscore: \b does not, and access_token= went out in clear. The value may
-# follow a colon or spaces and may be quoted, because a notebook writes
-# token="..." and a JSON body writes "token": "...", and both went out in
-# clear when only key=value was recognised. secret covers client_secret, and
-# sig is the key of an Azure shared access signature: both went out in clear.
+# underscore or a hyphen: \b does not, and access_token= went out in clear.
+# It may also follow a lower case letter when it starts with a capital, so
+# accessToken, clientSecret and authToken are keys, while mytoken is not. The
+# value may follow a colon or spaces and may be quoted, because a notebook
+# writes token="..." and a JSON body writes "token": "...", and both went out
+# in clear when only key=value was recognised. secret covers client_secret,
+# and sig is the key of an Azure shared access signature. A Bearer or Basic
+# scheme word before the value is part of the value, so the credential after
+# it is replaced and not the scheme word alone.
+SECRET_KEYS = (r"token|password|passwd|pwd|apikey|api[-_]?key|code_verifier|"
+               r"signature|secret|sig|authorization")
+SECRET_CAMEL = (r"Token|Password|Passwd|Pwd|ApiKey|Api[-_]?Key|Signature|"
+                r"Secret|Sig|Authorization")
 SECRET_RE = re.compile(
-    r"(?i)(?<![a-z0-9])(token|password|apikey|api_key|code_verifier|"
-    r"signature|secret|sig)([\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|"
-    r"[^&\s\"'<>,;(){}\[\]]+)")
+    r"((?<![A-Za-z0-9])(?i:" + SECRET_KEYS + r")|(?<=[a-z0-9])(?:"
+    + SECRET_CAMEL + r"))([\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|"
+    r"(?i:(?:bearer|basic)\s+)?[^&\s\"'<>,;(){}\[\]]+)")
+
+# A password inside a url, scheme://user:password@host, and a Bearer token
+# written without a key in front of it, as in a header copied into a note.
+URL_SECRET_RE = re.compile(r"(?i)(://[^/\s:@]+:)([^/\s@]+)(@)")
+BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{8,})")
 
 # Characters that move a terminal's cursor or change what it shows. An item
 # title is typed by whoever owns the item, and one holding ESC [2K and a
@@ -253,8 +275,10 @@ def scrub(text):
     in its query string, and that excerpt is the most useful thing in the
     report, so it is printed with the token taken out rather than dropped.
     """
-    return SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + REDACTED,
-                         "%s" % (text,))
+    out = SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + REDACTED,
+                        "%s" % (text,))
+    out = URL_SECRET_RE.sub(lambda m: m.group(1) + REDACTED + m.group(3), out)
+    return BEARER_RE.sub(lambda m: m.group(1) + REDACTED, out)
 
 
 def redact(text, *secrets):
@@ -834,8 +858,18 @@ class Report(object):
     """What the sweep found, and every reason it might not be the whole story."""
 
     def __init__(self, target, findings, scanned, unread, unproven, edges=(),
-                 names=None):
+                 names=None, own=(), caveats=()):
         self.target = target
+        # Reasons a clean answer cannot be trusted although every item that
+        # was searched was read: no credential, a --query, a target that is
+        # not among the items. They change exit 0 into exit 2 and nothing
+        # else, because a reference that WAS found is true whatever else
+        # was missed.
+        self.caveats = list(caveats)
+        # Ids of the items this tool published as its own graph of the target.
+        # They are left out of the search, and listed so that nobody has to
+        # take the omission on trust.
+        self.own = sorted(own)
         self.findings = list(findings)
         self.scanned = int(scanned)
         self.unread = list(unread)
@@ -887,7 +921,26 @@ class Report(object):
             self.target, len(self.items), self.scanned, len(self.unread))
 
 
-def inspect(target, items, reader, echo=None, unproven=(), url=None):
+def is_own_graph(target, meta, payloads):
+    """True when an item is the graph --publish made for this target.
+
+    The tag and the type are what publish_fields() sets, and the file has to
+    be a graph of this target as well, so that an item which only borrows the
+    tag is still searched. Without this the sweep after a --publish read the
+    graph, which names the target in its title, its description and its file,
+    and reported it as a reference. A scheduled run then exited 1 for ever.
+    """
+    tags = meta.get("tags")
+    if meta.get("type") != PUBLISH_TYPE or not (
+            isinstance(tags, list) and PUBLISH_TAG in tags
+            and "%s-%s" % (PUBLISH_TAG, target) in tags):
+        return False
+    return any(isinstance(body, dict) and body.get("whobreaks_graph") == 1
+               and body.get("target") == target for _source, body in payloads)
+
+
+def inspect(target, items, reader, echo=None, unproven=(), url=None,
+            caveats=()):
     """Search every item's configuration for the target. Returns a Report.
 
     url is the target's service url needle, or None. The same read of each item
@@ -911,6 +964,7 @@ def inspect(target, items, reader, echo=None, unproven=(), url=None):
     unread = []
     edges = []
     names = {}
+    own = []
     scanned = 0
     for iid in sorted(items):
         meta = items[iid] or {}
@@ -919,7 +973,6 @@ def inspect(target, items, reader, echo=None, unproven=(), url=None):
             # than filtering it out of the report keeps it out of the item
             # count as well.
             continue
-        scanned += 1
         payloads = []
         try:
             payloads, problem = reader(iid, int(meta.get("size") or 0))
@@ -929,6 +982,10 @@ def inspect(target, items, reader, echo=None, unproven=(), url=None):
             # not what it claimed. None of them are a reason to stop reading
             # the other 9,000 items, and all of them make this item unread.
             problem = scrub("%s" % (exc,))
+        if not problem and is_own_graph(target, meta, payloads):
+            own.append(iid)
+            continue
+        scanned += 1
         if problem:
             unread.append({"id": iid, "title": meta.get("title") or "",
                            "problem": scrub(problem)})
@@ -951,7 +1008,9 @@ def inspect(target, items, reader, echo=None, unproven=(), url=None):
                                    meta.get("title") or "untitled"))
     findings.sort(key=lambda hit: (-RANK[hit["kind"]], hit["id"],
                                    hit["source"], hit["path"]))
-    return Report(target, findings, scanned, unread, unproven, edges, names)
+    edges = [edge for edge in edges if edge["to"] not in own]
+    return Report(target, findings, scanned, unread, unproven, edges, names,
+                  own, caveats)
 
 
 def impact(edges, target, depth):
@@ -1067,6 +1126,20 @@ def describe(report, depth=1):
                    % (report.scanned, report.target))
     if depth > 1:
         out.extend(describe_transitive(report, depth))
+    if report.caveats:
+        out.append("")
+        out.append("the search may not have covered every item that could "
+                   "reference the target:")
+        for reason in report.caveats:
+            out.append("  - %s" % reason)
+        if not report.findings:
+            out.append("An empty result is not an all clear here, so the "
+                       "exit code is 2.")
+    if report.own:
+        out.append("")
+        out.append("%d item(s) not searched, because each is the graph this "
+                   "tool published for the target: %s"
+                   % (len(report.own), ", ".join(report.own)))
     if report.unread:
         out.append("")
         out.append("%d item(s) COULD NOT BE READ, so they are not clean, they "
@@ -1094,10 +1167,15 @@ def exit_code(report):
     Incomplete beats found, because the two answers are used differently. A
     person who sees 1 goes and looks at the items. A person who sees 0 deletes
     the item, and 0 has to mean the sweep was complete, not that it finished.
+    A caveat only blocks 0: with no credential, with a --query, or when the
+    target is not among the items, an empty result may only mean the sweep
+    could not see the item that uses the target.
     """
     if not report.complete:
         return 2
-    return 1 if report.findings else 0
+    if report.findings:
+        return 1
+    return 2 if report.caveats else 0
 
 
 def build_document(url, query, target, taken, report, depth=1,
@@ -1118,6 +1196,7 @@ def build_document(url, query, target, taken, report, depth=1,
         "mention": report.counted(MENTION),
         "unread": list(report.unread),
         "unproven": list(report.unproven),
+        "caveats": list(report.caveats),
         "findings": [{field: hit.get(field, "") for field in CSV_FIELDS}
                      for hit in report.findings],
     }
@@ -1826,7 +1905,8 @@ def community_user(url, token, insecure=False):
 
 
 def publish_fields(target, taken, complete):
-    """The item properties --publish sends: its title, tags and description.
+    """The item properties --publish sends: its type and the keyword that
+    type requires, its title, tags and description.
 
     The second tag names the target, so that an item published for one target
     is never overwritten with the graph of another. The description says in
@@ -1835,6 +1915,7 @@ def publish_fields(target, taken, complete):
     """
     return {
         "type": PUBLISH_TYPE,
+        "typeKeywords": PUBLISH_KEYWORD,
         "title": "whobreaks graph %s" % target,
         "tags": "%s,%s-%s" % (PUBLISH_TAG, PUBLISH_TAG, target),
         "description": "Who breaks if %s is deleted, taken %s. %s Written by "
@@ -1883,6 +1964,7 @@ def publish_graph(url, token, graph, item=None, insecure=False):
             raise RuntimeError("item %s was not overwritten: %s" % (item,
                                                                    problem))
         del fields["type"]
+        del fields["typeKeywords"]
         path = "content/users/%s/items/%s/update" % (
             urllib.parse.quote(user, safe=""), item)
     else:
@@ -2023,9 +2105,9 @@ def self_test():
     # The same 32 characters living inside a longer hexadecimal identifier. A
     # substring scan reports this; an item id is a token, so this is not one.
     LONGER = "bb" + TARGET + "cc"
-    THUMB = ("https://county.maps.arcgis.com/sharing/rest/content/items/%s"
+    THUMB = ("https://yourorg.maps.arcgis.com/sharing/rest/content/items/%s"
              "/info/thumbnail/thumbnail.png" % TARGET)
-    PORTAL = "https://county.maps.arcgis.com"
+    PORTAL = "https://yourorg.maps.arcgis.com"
     DAY = DAY_MS
     BASE = 1577836800000                       # 2020-01-01T00:00:00Z, epoch ms
     NOW = BASE + 800 * DAY
@@ -2050,7 +2132,7 @@ def self_test():
            "<-- pinned defect")
     raises(lambda: normalise_target(""), "an empty target is refused")
     raises(lambda: normalise_target(None), "a missing target is refused")
-    raises(lambda: normalise_target("Parcels"),
+    raises(lambda: normalise_target("Plots"),
            "an item title is refused, it is not an id")
 
     # ---- the matcher, which is a token search and not a substring scan
@@ -2083,7 +2165,7 @@ def self_test():
           "advances by one and not by the length of what it matched")
     check(id_positions(OTHER, TARGET) == [], "another id does not match")
     check(id_positions("", TARGET) == [], "an empty string holds no id")
-    check(id_positions("the parcels layer", TARGET) == [],
+    check(id_positions("the plots layer", TARGET) == [],
           "ordinary prose holds no id")
     raises(lambda: id_positions(TARGET, ""),
            "an empty target raises rather than matching everything")
@@ -2133,12 +2215,12 @@ def self_test():
           "a thumbnail url under a key this tool never heard of is still a "
           "thumbnail, because the url says so  <-- pinned defect")
     check(is_thumbnail_context(
-          ("card",), "https://county.maps.arcgis.com/sharing/rest/content/"
+          ("card",), "https://yourorg.maps.arcgis.com/sharing/rest/content/"
           "items/%s/info/thumbnail.png" % TARGET) is True,
           "and so is the older /info/thumbnail.png, which has no directory "
           "after it for the other test to see  <-- pinned defect")
     check(is_thumbnail_context(
-          ("card",), "https://county.maps.arcgis.com/sharing/rest/content/"
+          ("card",), "https://yourorg.maps.arcgis.com/sharing/rest/content/"
           "items/%s/info/Thumbnail/Thumbnail.png" % TARGET) is True,
           "and one typed with capitals, because the url is lowered before it "
           "is looked at  <-- pinned defect")
@@ -2252,7 +2334,7 @@ def self_test():
         "_ssr": True,
         "dataSources": {
             "dataSource_1": {"itemId": TARGET, "type": "WEB_MAP",
-                             "label": "Permits"},
+                             "label": "Sites"},
             "dataSource_2": {"itemId": OTHER, "type": "FEATURE_LAYER"},
         },
         "widgets": {
@@ -2300,7 +2382,7 @@ def self_test():
         }],
         "bookmarks": [{"name": "site %s" % TARGET}],
     }
-    CLONE = {"title": "Parcel Viewer copy",
+    CLONE = {"title": "Plot Viewer copy",
              "thumbnail": THUMB,
              "card": {"imageUrl": THUMB},
              "operationalLayers": [{"url": "https://services/x/FeatureServer"}]}
@@ -2393,7 +2475,7 @@ def self_test():
     # The id and the token have to be in the SAME string. A token in a
     # neighbouring value is never inside this excerpt to begin with, so an
     # assertion written that way passes whatever excerpt() does with it.
-    secret_url = ("https://county.maps.arcgis.com/sharing/rest/content/items/"
+    secret_url = ("https://yourorg.maps.arcgis.com/sharing/rest/content/items/"
                   "%s/data?token=SECRET123&f=json" % TARGET)
     secret_map = {"operationalLayers": [{"url": secret_url}]}
     secret_hits = scan_payload(TARGET, secret_map, "data")
@@ -2423,6 +2505,25 @@ def self_test():
           "and so is a client_secret in a notebook  <-- pinned defect")
     check(scrub("mytoken=abc") == "mytoken=abc",
           "and a key that merely ends in token after a letter is left alone")
+    for camel in ("accessToken=S3CR3T", '{"clientSecret": "S3CR3T"}',
+                  "authToken: S3CR3T", "?sessionToken=S3CR3T&f=json",
+                  "oauthToken='S3CR3T'", "refreshToken=S3CR3T",
+                  "apiKey=S3CR3T", "api-key=S3CR3T", "pwd=S3CR3T",
+                  "passwd=S3CR3T", "Authorization: Bearer S3CR3T",
+                  "Authorization: Basic S3CR3T", "https://svc:S3CR3T@host/x",
+                  "a header copied into a note: Bearer S3CR3TVALUE"):
+        check("S3CR3T" not in scrub(camel),
+              "a secret written as %s is redacted, because a key with a "
+              "capital after a lower case letter is still a key  "
+              "<-- pinned defect" % camel)
+    check(scrub("Authorization: Bearer S3CR3T") == "Authorization: %s"
+          % REDACTED and scrub("https://svc:S3CR3T@host/x")
+          == "https://svc:%s@host/x" % REDACTED,
+          "and the scheme word and the host around a secret are kept, so the "
+          "excerpt still shows where it was")
+    check(scrub("signal=1 design: a bearer token") == "signal=1 design: a "
+          "bearer token", "and words that only contain a key, or a bearer "
+          "with nothing after it, are left alone")
     for form in ('token="S3CR3T"', "token='S3CR3T'", 'password = "S3CR3T"',
                  '"token": "S3CR3T"', 'GIS(api_key="S3CR3T")'):
         check("S3CR3T" not in scrub(form) and REDACTED in scrub(form),
@@ -2442,6 +2543,13 @@ def self_test():
           and "content.get" in kwarg[0]["excerpt"],
           "so a notebook cell that signs in with a keyword argument next to "
           "the id prints the call and not the key  <-- pinned defect")
+    camel_hit = scan_payload(TARGET, {"cells": [{"cell_type": "code", "source": [
+        'conn = connect(accessToken="eyJ.S3CR3T.SIG"); '
+        'lyr = get("%s")' % TARGET]}]}, "data")
+    check(len(camel_hit) == 1 and "S3CR3T" not in camel_hit[0]["excerpt"]
+          and "get(" in camel_hit[0]["excerpt"],
+          "so a notebook cell that signs in with accessToken next to the id "
+          "prints the call and not the token  <-- pinned defect")
     far = ("https://svc.example.org/arcgis/rest/services/x/FeatureServer?token="
            "SECRETSECRETSECRETSECRETSECRETSECRETSECRET&itemId=%s" % TARGET)
     far_excerpt = scan_payload(TARGET, {"layers": [{"url": far}]},
@@ -2502,29 +2610,29 @@ def self_test():
           "an excerpt from a pretty printed config is one line")
 
     # ---- the target's own service url, matched as text and never opened
-    SVC_NEEDLE = "services.example.com/abc/arcgis/rest/services/permits/featureserver"
+    SVC_NEEDLE = "services.example.com/abc/arcgis/rest/services/sites/featureserver"
     check(url_needle("HTTPS://Services.Example.com/ABC/arcgis/rest/services/"
-                     "Permits/FeatureServer/?f=json#top", TARGET)
+                     "Sites/FeatureServer/?f=json#top", TARGET)
           == (SVC_NEEDLE, None),
           "a service url loses its scheme, query string, fragment and trailing "
           "slash and is lowered, because configs write the same service in "
           "all those ways  <-- pinned defect")
-    check(url_needle("//services.example.com/ABC/arcgis/rest/services/Permits/"
+    check(url_needle("//services.example.com/ABC/arcgis/rest/services/Sites/"
                      "FeatureServer")[0] == SVC_NEEDLE,
           "a scheme-relative url is read the same")
     check(url_needle(None) == (None, "the target item has no url"),
           "an item with no url has no needle, and says why")
     check(url_needle("   ")[0] is None, "and neither does a url of whitespace")
     check(url_needle("https://svc:Hunter2@Services.Example.com/ABC/arcgis/"
-                     "rest/services/Permits/FeatureServer")[0] == SVC_NEEDLE,
+                     "rest/services/Sites/FeatureServer")[0] == SVC_NEEDLE,
           "a url carrying a user and password is searched for without them, "
           "because the needle is printed and a config names the service "
           "without them  <-- pinned defect")
     check(url_needle("https://svc:p@ss@Services.Example.com/ABC/arcgis/rest/"
-                     "services/Permits/FeatureServer")[0] == SVC_NEEDLE,
+                     "services/Sites/FeatureServer")[0] == SVC_NEEDLE,
           "and a password with an @ in it comes off whole, up to the LAST @")
     check(url_needle("https://Services.Example.com/ABC/arcgis/rest/services/"
-                     "Permits/FeatureServer#layer0")[0] == SVC_NEEDLE,
+                     "Sites/FeatureServer#layer0")[0] == SVC_NEEDLE,
           "a fragment with no query string before it comes off too")
     for app in ("https://org.example/apps/webappviewer/index.html?id=%s",
                 "https://org.example/apps/instant/sidebar/index.html?appid=%s"):
@@ -2537,13 +2645,13 @@ def self_test():
                     url_needle(app % TARGET, TARGET)[0]) == [],
           "so a site linking to ANOTHER app of that template is no break")
     FOLDER = url_needle("https://maps.example.org/arcgis/rest/services/"
-                        "Permits")[0]
+                        "Sites")[0]
     check(url_positions("https://maps.example.org/arcgis/rest/services/"
-                        "Permits_old/FeatureServer", FOLDER) == []
+                        "Sites_old/FeatureServer", FOLDER) == []
           and url_positions("https://maps.example.org/arcgis/rest/services/"
-                            "Permits-2024/FeatureServer", FOLDER) == [],
-          "an underscore or a dash continues a service name, so Permits is not "
-          "found inside Permits_old or Permits-2024")
+                            "Sites-2024/FeatureServer", FOLDER) == [],
+          "an underscore or a dash continues a service name, so Sites is not "
+          "found inside Sites_old or Sites-2024")
     bare = url_needle("https://maps.example.org/", TARGET)
     check(bare[0] is None and "whole server" in bare[1],
           "a url that is a bare server is refused as a needle, because it would "
@@ -2574,10 +2682,10 @@ def self_test():
           "a url that carries the target id is left to the id search, so one "
           "occurrence is not counted twice  <-- pinned defect")
     LAYER1 = url_needle("https://maps.example.org/arcgis/rest/services/"
-                        "Permits/FeatureServer/1")[0]
+                        "Sites/FeatureServer/1")[0]
     encoded = ("https://www.arcgis.com/apps/mapviewer/index.html?url="
                + urllib.parse.quote("https://maps.example.org/arcgis/rest/"
-                                    "services/Permits/FeatureServer/1",
+                                    "services/Sites/FeatureServer/1",
                                     safe=""))
     check([hit["kind"] for hit in scan_text(TARGET, encoded, ("url",), "data",
                                            LAYER1)] == [HARD],
@@ -2585,37 +2693,37 @@ def self_test():
           "hard break, not a clean run  <-- pinned defect")
     check([hit["count"] for hit in scan_payload(
               TARGET, {"url": "https://maps.example.org/arcgis/rest/services/"
-                              "Permits/FeatureServer/1?x=%20"}, "data",
+                              "Sites/FeatureServer/1?x=%20"}, "data",
               LAYER1)] == [1],
           "and a plain url with a % in its query is counted once, not twice")
-    check(url_positions("https://maps.example.org/arcgis/rest/services/Permits/"
+    check(url_positions("https://maps.example.org/arcgis/rest/services/Sites/"
                         "FeatureServer/1", LAYER1) == [8],
           "the target url matches itself")
-    check(url_positions("http://MAPS.example.org/arcgis/rest/services/permits/"
+    check(url_positions("http://MAPS.example.org/arcgis/rest/services/sites/"
                         "featureserver/1?token=x", LAYER1) == [7],
           "and matches over http, in capitals, with a query string after it")
-    check(url_positions("https://maps.example.org/arcgis/rest/services/Permits/"
+    check(url_positions("https://maps.example.org/arcgis/rest/services/Sites/"
                         "FeatureServer/12", LAYER1) == [],
           "layer 1 does not match inside layer 12, because a digit continues "
           "the url  <-- pinned defect")
     check(url_positions("https://oldmaps.example.org/arcgis/rest/services/"
-                        "Permits/FeatureServer/1", LAYER1) == [],
+                        "Sites/FeatureServer/1", LAYER1) == [],
           "the same path on a host whose name ENDS in the target's host is not "
           "the target  <-- pinned defect")
     check(url_positions("https://gis.maps.example.org/arcgis/rest/services/"
-                        "Permits/FeatureServer/1", LAYER1) == [],
+                        "Sites/FeatureServer/1", LAYER1) == [],
           "and neither is the same path on a sub-host of it  <-- pinned defect")
     check(url_positions("https://services.example.com/ABC/arcgis/rest/services/"
-                        "Permits/FeatureServer/0/query", SVC_NEEDLE) == [8],
+                        "Sites/FeatureServer/0/query", SVC_NEEDLE) == [8],
           "a layer url under the target's service matches, because a slash "
           "ends the service  <-- pinned defect")
     check(url_positions("any text", None) == [], "no needle finds nothing")
     URL_MAP = {
-        "operationalLayers": [{"title": "Permits", "url":
+        "operationalLayers": [{"title": "Sites", "url":
                                "https://services.example.com/ABC/arcgis/rest/"
-                               "services/Permits/FeatureServer/0"}],
+                               "services/Sites/FeatureServer/0"}],
         "description": "copied from https://services.example.com/abc/arcgis/"
-                       "rest/services/permits/featureserver last year",
+                       "rest/services/sites/featureserver last year",
     }
     url_hits = scan_payload(TARGET, URL_MAP, "data", SVC_NEEDLE)
     check(sorted(hit["kind"] for hit in url_hits) == [HARD, MENTION],
@@ -2628,7 +2736,7 @@ def self_test():
           "without the needle the same web map yields nothing, which is the gap "
           "the url search closes")
     check(scan_item(TARGET, {"url": "https://services.example.com/abc/arcgis/"
-                                    "rest/services/Permits/FeatureServer"},
+                                    "rest/services/Sites/FeatureServer"},
                     [], SVC_NEEDLE)[0]["kind"] == HARD,
           "a second item registered on the target's service url is a hard "
           "break, found in the search result alone")
@@ -2646,11 +2754,11 @@ def self_test():
         return read
 
     ITEMS = catalog(
-        {"id": TARGET, "title": "Permits", "type": "Feature Service",
-         "owner": "gis_admin", "size": 4096},
-        {"id": "exb0000000000000000000000000000a", "title": "Permit finder",
+        {"id": TARGET, "title": "Sites", "type": "Feature Service",
+         "owner": "pubadmin", "size": 4096},
+        {"id": "exb0000000000000000000000000000a", "title": "Site finder",
          "type": "Web Experience", "owner": "ann", "size": 20},
-        {"id": "dsh0000000000000000000000000000b", "title": "Permit board",
+        {"id": "dsh0000000000000000000000000000b", "title": "Site board",
          "type": "Dashboard", "owner": "bob", "size": 20},
         {"id": "cln0000000000000000000000000000c", "title": "Cloned viewer",
          "type": "Web Mapping Application", "owner": "ann", "size": 20},
@@ -2693,7 +2801,7 @@ def self_test():
           "the counts are per item and not per finding")
 
     ORDERED = catalog(
-        {"id": "dsh0000000000000000000000000000b", "title": "Permit board",
+        {"id": "dsh0000000000000000000000000000b", "title": "Site board",
          "type": "Dashboard", "owner": "bob", "size": 20},
         {"id": "aaa0000000000000000000000000000e", "title": "Old notes",
          "type": "Web Map", "owner": "dee", "size": 20,
@@ -2872,11 +2980,11 @@ def self_test():
         return {"from": src, "to": dst, "kind": kind}
 
     EDGE_ITEMS = catalog(
-        {"id": TARGET, "title": "Permits", "type": "Feature Service"},
-        {"id": W_MAP, "title": "Permit layers", "type": "Web Map"},
-        {"id": W_APP, "title": "Permit viewer", "type": "Web Mapping "
+        {"id": TARGET, "title": "Sites", "type": "Feature Service"},
+        {"id": W_MAP, "title": "Site layers", "type": "Web Map"},
+        {"id": W_APP, "title": "Site viewer", "type": "Web Mapping "
          "Application"},
-        {"id": W_NOTE, "title": "Permit notes", "type": "Web Map",
+        {"id": W_NOTE, "title": "Site notes", "type": "Web Map",
          "description": "an older copy of %s" % W_MAP})
     reads = []
 
@@ -2893,7 +3001,7 @@ def self_test():
           "every other item of the sweep")
     check(len(reads) == 3,
           "at no extra portal cost: three items searched, three reads")
-    check(edged.names[W_APP] == {"title": "Permit viewer",
+    check(edged.names[W_APP] == {"title": "Site viewer",
                                  "type": "Web Mapping Application"},
           "and the title of every item searched is kept for the report")
     both_ways = inspect(TARGET, catalog(
@@ -3326,7 +3434,7 @@ def self_test():
 
     # ---- the pieces of the portal layer that need no socket
     check(is_http_url(PORTAL) is True, "an https url is one urllib can open")
-    check(is_http_url("county.maps.arcgis.com") is False,
+    check(is_http_url("yourorg.maps.arcgis.com") is False,
           "a url with no scheme is refused, because urllib quotes the whole "
           "url back into its error and that url carries the token  "
           "<-- pinned defect")
@@ -3415,7 +3523,7 @@ def self_test():
     saved_getpass = getpass.getpass
     getpass.getpass = lambda prompt="": typed.append(prompt) or "typed-secret"
     try:
-        check(read_secret("gis_admin") == "typed-secret",
+        check(read_secret("pubadmin") == "typed-secret",
               "with nothing in the environment the password is PROMPTED for, "
               "never taken from argv  <-- pinned defect")
         check(typed and "not echoed" in typed[0],
@@ -3423,7 +3531,7 @@ def self_test():
         # Set through the literal name, not through SECRET_ENV. Reading
         # the name from the constant would pass under any rename of it.
         os.environ["WHOBREAKS_PASSWORD"] = "from-the-environment"
-        check(read_secret("gis_admin") == "from-the-environment",
+        check(read_secret("pubadmin") == "from-the-environment",
               "WHOBREAKS_PASSWORD is the variable a scheduled run sets, and "
               "it is used when it is set  <-- pinned defect")
     finally:
@@ -3465,35 +3573,41 @@ def self_test():
         return meta
 
     CATALOG = [
-        row(TARGET, "Permits", "Feature Service", owner="gis_admin"),
-        row(EXB_ID, "Permit finder", "Web Experience"),
+        row(TARGET, "Sites", "Feature Service", owner="pubadmin"),
+        row(EXB_ID, "Site finder", "Web Experience"),
         # A title no Windows code page holds, for the console test.
-        row(DASH_ID, "Permit board \u8a31\u53ef", "Dashboard", owner="bob"),
-        row(STORY_ID, "How permits work", "StoryMap"),
+        row(DASH_ID, "Site board \u8a31\u53ef", "Dashboard", owner="bob"),
+        row(STORY_ID, "How sites work", "StoryMap"),
         row(NOTE_ID, "Nightly refresh", "Notebook", owner="cal"),
-        row(MAP_ID, "Permit map", "Web Map"),
+        row(MAP_ID, "Site map", "Web Map"),
         row(CLONE_ID, "Cloned viewer", "Web Mapping Application"),
         row(DEAD_ID, "Locked report", "PDF", owner="cal"),
         row(TEXT_ID, "refresh.py", "Code Attachment"),
         row(DESC_ID, "Archive notes", "Document Link",
             description="superseded by %s, keep for audit" % TARGET),
-        row(BIG_ID, "Parcel delivery", "File Geodatabase",
+        row(BIG_ID, "Plot delivery", "File Geodatabase",
             size=MAX_ITEM_SIZE + 1),
     ]
     # A second organization, reached under /wide, for the transitive search
     # and the service url. Its own catalogue, so that every count asserted
     # against the first one above still holds.
     WIDE = [
-        row(TARGET, "Permits", "Feature Service", owner="gis_admin"),
-        row(W_MAP, "Permit layers", "Web Map"),
-        row(W_APP, "Permit viewer", "Web Mapping Application"),
-        row(W_SITE, "Permit site", "Hub Site Application"),
-        row(W_NOTE, "Permit notes", "Web Map",
+        row(TARGET, "Sites", "Feature Service", owner="pubadmin"),
+        row(W_MAP, "Site layers", "Web Map"),
+        row(W_APP, "Site viewer", "Web Mapping Application"),
+        row(W_SITE, "Home site", "Hub Site Application"),
+        row(W_NOTE, "Site notes", "Web Map",
             description="an older copy of %s" % W_MAP),
-        row(W_DOC, "Permit handbook", "StoryMap",
+        row(W_DOC, "Site handbook", "StoryMap",
             description="explains %s" % TARGET),
         row(W_EMBED, "Handbook board", "Dashboard"),
-        row(W_FILT, "Permit filter board", "Dashboard"),
+        row(W_FILT, "Site filter board", "Dashboard"),
+    ]
+    # A third organization, under /lone, where nothing references the target.
+    # It is the one in which a clean answer is exit 0.
+    LONE = [
+        row(TARGET, "Sites", "Feature Service", owner="pubadmin"),
+        row("c1" + "0" * 30, "Unrelated map", "Web Map"),
     ]
     PYTEXT = ("import arcgis\n"
               "lyr = gis.content.get('%s')  # nightly refresh\n" % TARGET)
@@ -3512,7 +3626,7 @@ def self_test():
         W_SITE: {"widgets": [{"type": "app", "itemId": W_APP}]},
         W_EMBED: {"widgets": [{"type": "embed", "itemId": W_DOC}]},
         W_FILT: {"widgets": [{"type": "mapWidget", "itemId": W_MAP}],
-                 "datasets": [{"filter": "PERMIT_SRC = '%s'" % TARGET}]},
+                 "datasets": [{"filter": "SITE_SRC = '%s'" % TARGET}]},
         # W_MAP is added once the server is listening, because its layers
         # point back at that server, which is how a fetch would be seen.
     }
@@ -3584,7 +3698,7 @@ def self_test():
             # when the target is not public.
             variant = ""
             for prefix in ("/blind", "/wide", "/noinfo", "/badid",
-                           "/badtotal"):
+                           "/badtotal", "/lone"):
                 if path.startswith(prefix + "/"):
                     variant, path = prefix, path[len(prefix):]
             blind = variant == "/blind"
@@ -3626,8 +3740,13 @@ def self_test():
                 # on: the kind of failure nothing in this tool foresaw.
                 return self._json({"total": [1], "results": []})
             if route == "search":
-                return self._search(params, WIDE if variant == "/wide"
-                                    else CATALOG)
+                catalog = {"/wide": WIDE, "/lone": LONE}.get(variant, CATALOG)
+                # Items the publish calls stored, when a test lists them.
+                kept = [row(iid, "stored", self.server.stored[iid]["type"],
+                            owner=self.server.stored[iid]["owner"],
+                            tags=self.server.stored[iid]["tags"])
+                        for iid in self.server.listed]
+                return self._search(params, catalog + kept)
             if route.startswith("content/items/"):
                 return self._item(route[len("content/items/"):], variant,
                                   params)
@@ -3690,11 +3809,19 @@ def self_test():
                                    % params.get("token")}})
             if self.server.mode == "failed":
                 return self._json({"success": False})
+            if adding and params.get("type") == PUBLISH_TYPE and not (
+                    set((params.get("typeKeywords") or "").split(","))
+                    & PUBLISH_KEYWORDS):
+                # What the item types page says of a Code Attachment.
+                return self._json({"error": {"code": 400, "message":
+                                   "Unable to add item: a Code Attachment "
+                                   "needs a type keyword."}})
             name, filename, content, ctype = self.server.upload
             if adding:
                 iid = "ab%030x" % (len(self.server.stored) + 1)
                 self.server.stored[iid] = {
                     "id": iid, "owner": user, "type": params.get("type"),
+                    "typeKeywords": params.get("typeKeywords"),
                     "tags": params.get("tags").split(","),
                     "title": params.get("title"),
                     "description": params.get("description"),
@@ -3702,18 +3829,21 @@ def self_test():
                     "data": content}
             else:
                 iid = steps[1]
+                self.server.updates.append(sorted(params))
                 self.server.stored[iid].update(
                     data=content, file=filename, title=params.get("title"),
                     description=params.get("description"))
             if self.server.mode == "noid":
                 return self._json({"success": True})
+            if self.server.mode == "falseid":
+                return self._json({"success": False, "id": iid})
             if self.server.mode == "corrupt":
                 self.server.stored[iid]["data"] = content + b" "
             return self._json({"success": True, "id": iid})
 
         def _item(self, rest, variant, params):
             iid, _slash, tail = rest.partition("/")
-            if iid in self.server.stored:
+            if iid in self.server.stored and tail in ("", "data"):
                 kept = self.server.stored[iid]
                 if tail == "data":
                     return self._send(kept["data"], ctype=kept["ctype"])
@@ -3778,18 +3908,20 @@ def self_test():
     server.cap_next = False
     server.service_url = None
     server.stored = {}                  # items the publish calls made or hold
+    server.updates = []                 # the field names of each update call
+    server.listed = []                  # stored ids the search also returns
     server.upload = None
-    server.mode = "ok"                  # ok, refuse, failed, noid or corrupt
-    server.who = {"username": "gis_admin"}
+    server.mode = "ok"      # ok, refuse, failed, noid, falseid or corrupt
+    server.who = {"username": "pubadmin"}
     thread = threading.Thread(target=server.serve_forever)
     thread.daemon = True
     thread.start()
     workdir = tempfile.mkdtemp(prefix="whobreaks-selftest-")
     try:
         LIVE = "http://127.0.0.1:%d" % server.server_address[1]
-        server.service_url = LIVE + "/arcgis/rest/services/Permits/FeatureServer"
+        server.service_url = LIVE + "/arcgis/rest/services/Sites/FeatureServer"
         DATA[W_MAP] = {"operationalLayers": [
-            {"title": "Permits", "url": server.service_url + "/0"},
+            {"title": "Sites", "url": server.service_url + "/0"},
             {"title": "Elsewhere",
              "url": LIVE + "/trap/rest/services/Other/FeatureServer/0"}]}
         check(server.server_address[0] == "127.0.0.1",
@@ -3800,12 +3932,12 @@ def self_test():
         # the transport, one call at a time
         check(org_id(LIVE, None) == "REALORG",
               "portals/self answers over a real socket")
-        check(generate_token(LIVE, "gis_admin", PASSWORD) == LIVE_TOKEN,
+        check(generate_token(LIVE, "pubadmin", PASSWORD) == LIVE_TOKEN,
               "a real POST exchanges a real password for a token")
         check(any("password=%s" % PASSWORD in body for body in server.posted),
               "and the password really did travel in the POST body, not in "
               "the query string  <-- pinned defect")
-        rejected = fails(lambda: generate_token(LIVE, "gis_admin", "wrong-pass"),
+        rejected = fails(lambda: generate_token(LIVE, "pubadmin", "wrong-pass"),
                          "a rejected sign-in raises")
         check("wrong-pass" not in rejected,
               "with the password stripped out of the portal's own echo of it  "
@@ -4036,9 +4168,13 @@ def self_test():
         code, seen = captured(lambda: main(
             ["--url", LIVE, "--target", TARGET, "--token", LIVE_TOKEN,
              "--query", "type:Form"]))
-        check(code == 0 and "no item in the 0 searched" in seen,
-              "a sweep that finds nothing, and read everything it found, is "
-              "the only run that exits 0  <-- pinned defect")
+        check(code == 2 and "no item in the 0 searched" in seen
+              and "not to the whole organization" in seen
+              and "the target itself was not among the 0 item(s)" in seen
+              and "is not an all clear here, so the exit code is 2" in seen,
+              "a --query that matches nothing is not a clean sweep: it "
+              "searched 0 items and found none, which is exit 2 and not 0, "
+              "and the output says why  <-- pinned defect")
 
         before = len(server.seen)
         code, seen = captured(lambda: main(
@@ -4062,7 +4198,7 @@ def self_test():
         os.environ[SECRET_ENV] = PASSWORD
         try:
             code, seen = captured(lambda: main(
-                ["--url", LIVE, "--target", TARGET, "--username", "gis_admin",
+                ["--url", LIVE, "--target", TARGET, "--username", "pubadmin",
                  "--query", "type:Dashboard"]))
         finally:
             del os.environ[SECRET_ENV]
@@ -4076,7 +4212,7 @@ def self_test():
         os.environ[SECRET_ENV] = "wrong-pass"
         try:
             code, seen = captured(lambda: main(
-                ["--url", LIVE, "--target", TARGET, "--username", "gis_admin"]))
+                ["--url", LIVE, "--target", TARGET, "--username", "pubadmin"]))
         finally:
             del os.environ[SECRET_ENV]
         check(code == 2, "a rejected sign-in exits 2")
@@ -4135,12 +4271,12 @@ def self_test():
         check(code == 64 and "--target is required" in seen,
               "no --target is a usage error")
         code, seen = captured(lambda: main(
-            ["--url", "county.maps.arcgis.com", "--target", TARGET]))
+            ["--url", "yourorg.maps.arcgis.com", "--target", TARGET]))
         check(code == 64 and "https://" in seen,
               "a scheme-less --url is refused before any request is built  "
               "<-- pinned defect")
         code, seen = captured(lambda: main(
-            ["--url", LIVE, "--target", "Parcels"]))
+            ["--url", LIVE, "--target", "Plots"]))
         check(code == 64 and "not an ArcGIS item id" in seen,
               "a target that is not an item id is refused before the sweep  "
               "<-- pinned defect")
@@ -4232,7 +4368,7 @@ def self_test():
         wide_seen = seen
         check(code == 1 and "3 item(s) reference %s" % TARGET in seen,
               "a sweep of the second org exits 1 with three direct references")
-        check("service url: 127.0.0.1:%d/arcgis/rest/services/permits/"
+        check("service url: 127.0.0.1:%d/arcgis/rest/services/sites/"
               "featureserver" % server.server_address[1] in seen,
               "and says which service url it searched for")
         check(any(line.startswith("HARD BREAK") and W_MAP in line
@@ -4260,7 +4396,7 @@ def self_test():
               "and not the map that only mentions a broken map, nor the "
               "dashboard embedding a story that only names the target  "
               "<-- pinned defect")
-        check("loads %s (Permit viewer), first hop %s" % (W_APP, W_MAP) in seen,
+        check("loads %s (Site viewer), first hop %s" % (W_APP, W_MAP) in seen,
               "the site's line names what it loads and the first hop")
         code, seen = captured(lambda: main(
             ["--url", WIDE_URL, "--target", TARGET, "--token", LIVE_TOKEN,
@@ -4566,8 +4702,8 @@ def self_test():
         check(all(one["from"] in page_text and one["to"] in page_text
                   for one in wide_graph["edges"]),
               "every edge of the graph is on the page")
-        check("Permit viewer" in page_text
-              and "<td>3</td><td>%s</td><td>Permit site</td>" % W_SITE
+        check("Site viewer" in page_text
+              and "<td>3</td><td>%s</td><td>Home site</td>" % W_SITE
               in page_text,
               "the titles come from the sweep, and --depth 3 puts the site at "
               "hop 3")
@@ -4615,7 +4751,7 @@ def self_test():
               "a sweep with unread items says NOT COMPLETE on the page and "
               "lists them, because a page that looked clean would be read as "
               "permission to delete  <-- pinned defect")
-        check("Permit board &#35377;&#21487;" in page_text,
+        check("Site board &#35377;&#21487;" in page_text,
               "and a title outside ASCII is written as a numeric reference, "
               "so the file reads the same on every host")
 
@@ -4635,7 +4771,7 @@ def self_test():
             page_text = handle.read()
         check(code == 1 and "Changed since the graph taken 2026-09-20T14:00:00Z"
               in page_text and W_SITE in page_text
-              and "Permit viewer" not in page_text,
+              and "Site viewer" not in page_text,
               "with --apply it writes the page for the second graph from the "
               "two files, by id, because a graph file holds no titles")
         check(len(server.seen) == before,
@@ -4726,6 +4862,31 @@ def self_test():
                   "a write that fails at the rename leaves the old page and "
                   "no partial file  <-- pinned defect")
 
+        with io.open(atomic, "rb") as handle:
+            raw_page = handle.read()
+        write_page(u"one\ntwo", atomic)
+        with io.open(atomic, "rb") as handle:
+            check(raw_page == b"short" and handle.read() == b"one\ntwo",
+                  "the page is written with a bare line feed on every host, "
+                  "never a carriage return, so the file is the same bytes on "
+                  "Windows and on Linux  <-- pinned defect")
+
+        def interrupted_replace(src, dst):
+            raise KeyboardInterrupt()
+
+        kept_replace, os.replace = os.replace, interrupted_replace
+        stopped = False
+        try:
+            try:
+                write_page(u"cut short", atomic)
+            except KeyboardInterrupt:
+                stopped = True
+        finally:
+            os.replace = kept_replace
+        check(stopped and not os.path.exists(atomic + ".part"),
+              "an interrupt in the middle of the write removes the partial "
+              "file too, not only an OSError does  <-- pinned defect")
+
         def refused_open(*args, **kwargs):
             raise OSError("open refused")
 
@@ -4745,10 +4906,92 @@ def self_test():
         code, seen = captured(lambda: main(
             ["--url", LIVE, "--target", TARGET, "--token", LIVE_TOKEN,
              "--query", "type:Dashboard"]), encoding="ascii")
-        check(code == 1 and DASH_ID in seen and "Permit board ??" in seen,
+        check(code == 1 and DASH_ID in seen and "Site board ??" in seen,
               "a title the console cannot encode is printed with a ? for each "
               "character, and the sweep still exits 1, because "
               "UnicodeEncodeError is a ValueError and used to make it exit 2  "
+              "<-- pinned defect")
+
+        # ---- dashboard facts that a mutation run showed nothing pinned
+        def column(page, heading, col):
+            """One cell of every row of the table under an h2 heading."""
+            part = page.split("<h2>" + heading)[1].split("<h2>")[0]
+            return [re.findall(r"<td>([^<]*)</td>", row)[col]
+                    for row in re.findall(r'<tr class="[a-z]+">(.*?)</tr>',
+                                          part)]
+
+        DT = "aa" + "0" * 30
+        D_H1, D_H2, D_S, D_M, D_S2, D_HOP2 = (
+            "b1" + "0" * 30, "b0" + "0" * 30, "c1" + "0" * 30,
+            "c2" + "0" * 30, "c3" + "0" * 30, "a1" + "0" * 30)
+        mixed = {"whobreaks_graph": 1, "url": "http://h", "query": "q",
+                 "target": DT, "taken": "t", "service_url": None,
+                 "complete": True, "scanned": 6, "unread": [],
+                 "unproven": [],
+                 "items": [D_H1, D_H2, D_S, D_M, D_S2, D_HOP2],
+                 "edges": [
+                     {"from": D_H1, "to": DT, "kind": HARD},
+                     {"from": D_S, "to": DT, "kind": SOFT},
+                     {"from": D_S2, "to": DT, "kind": SOFT},
+                     {"from": D_M, "to": DT, "kind": MENTION},
+                     {"from": D_HOP2, "to": D_H1, "kind": HARD},
+                     {"from": D_H2, "to": DT, "kind": HARD}]}
+        mixed_page = render_dashboard(mixed, None, {}, 2)
+        check(column(mixed_page, "Breaks if", 1) == [D_H2, D_H1, D_HOP2],
+              "the breaks table lists the first hop by id and then the second "
+              "hop, never by id alone  <-- pinned defect")
+        check(column(mixed_page, "Reference the target without", 1)
+              == [D_S, D_S2, D_M],
+              "the table of references that do not break lists the soft ones "
+              "and then the mention, and not the hard ones  "
+              "<-- pinned defect")
+        check(column(mixed_page, "Every reference between", 1)
+              == [D_HOP2, D_H2, D_H1, D_S, D_S2, D_M],
+              "the table of every reference lists the worst class first and "
+              "then the item  <-- pinned defect")
+        check("<td>service url searched</td><td>none</td>" in mixed_page,
+              "a graph with no service url says none, in lower case, on the "
+              "page  <-- pinned defect")
+        check("6: 3 hard, 2 soft, 1 mention" in mixed_page,
+              "the edges fact counts each class under its own name  "
+              "<-- pinned defect")
+        check("to depth 2</h2>" in mixed_page
+              and "to depth 3</h2>" in render_dashboard(mixed, None, {}, 3),
+              "and the heading says the depth the page was made for  "
+              "<-- pinned defect")
+        chain = ["%02x" % (0xc0 + n) + "0" * 30 for n in range(4)]
+        chain_graph = dict(mixed, items=chain, scanned=4, edges=[
+            {"from": chain[0], "to": DT, "kind": HARD}] + [
+            {"from": chain[n + 1], "to": chain[n], "kind": HARD}
+            for n in range(3)])
+        chain_files = []
+        for label in ("a", "b"):
+            chain_files.append(write_json(
+                chain_graph, os.path.join(workdir, "chain_%s.json" % label)))
+        chain_page = os.path.join(workdir, "chain.html")
+        code, seen = captured(lambda: compare_files(
+            chain_files[0], chain_files[1], chain_page, True, 4))
+        with io.open(chain_page, encoding="ascii") as handle:
+            chain_text = handle.read()
+        check(code == 0 and "to depth 4</h2>" in chain_text
+              and column(chain_text, "Breaks if", 1) == chain,
+              "--compare of two files with --depth 4 makes a page to depth 4 "
+              "with all four hops, not the first only  <-- pinned defect")
+        sweep_page = os.path.join(workdir, "sweep3.html")
+        code, seen = captured(lambda: main(
+            ["--url", LIVE + "/wide", "--target", TARGET, "--token",
+             LIVE_TOKEN, "--depth", "3", "--dashboard", sweep_page,
+             "--apply"]))
+        with io.open(sweep_page, encoding="ascii") as handle:
+            check("to depth 3</h2>" in handle.read(),
+                  "and a sweep with --depth 3 makes a page to depth 3  "
+                  "<-- pinned defect")
+        reasons = build_graph(PORTAL, "q", TARGET, "t", Report(
+            TARGET, [], 3, [], ["first reason", "second reason"]))
+        check(reasons["unproven"] == ["first reason", "second reason"]
+              and reasons["complete"] is False,
+              "the graph file keeps the reasons the sweep was not proven "
+              "complete, so a file and a published item say why  "
               "<-- pinned defect")
 
         # ---- --publish: the graph as one item, only under --apply
@@ -4781,13 +5024,17 @@ def self_test():
               and fields["tags"] == "whobreaks,whobreaks-" + TARGET
               and "Complete." in fields["description"],
               "the item is a Code Attachment titled and tagged for its target")
+        check(fields["typeKeywords"] in PUBLISH_KEYWORDS
+              and PUBLISH_KEYWORD == "Desktop",
+              "and it carries one of the type keywords the Esri item types "
+              "page says a Code Attachment requires  <-- pinned defect")
         check("NOT COMPLETE" in publish_fields(TARGET, "t", False)
               ["description"],
               "and the description of an incomplete sweep says so in words  "
               "<-- pinned defect")
-        good = {"owner": "gis_admin", "type": "Code Attachment",
+        good = {"owner": "pubadmin", "type": "Code Attachment",
                 "tags": ["whobreaks", "whobreaks-" + TARGET]}
-        check(publish_problem(good, "gis_admin", TARGET) is None,
+        check(publish_problem(good, "pubadmin", TARGET) is None,
               "an item this user made for this target may be replaced")
         for label, changed, want in (
                 ("another user's item", {"owner": "ann"}, "another user"),
@@ -4795,10 +5042,12 @@ def self_test():
                 ("a graph of another target",
                  {"tags": ["whobreaks", "whobreaks-" + OTHER]}, "published"),
                 ("an untagged item", {"tags": ["whobreaks"]}, "published"),
+                ("an item with only the target tag",
+                 {"tags": ["whobreaks-" + TARGET]}, "published"),
                 ("an item with no tag list", {"tags": None}, "published")):
             bad = dict(good)
             bad.update(changed)
-            why = publish_problem(bad, "gis_admin", TARGET)
+            why = publish_problem(bad, "pubadmin", TARGET)
             check(why is not None and want in why,
                   "%s is refused as a place to put the graph  "
                   "<-- pinned defect" % label)
@@ -4824,7 +5073,7 @@ def self_test():
               "exit code is still the sweep's, 2 for two unread items")
         made = server.stored[added[0]]
         first_graph = json.loads(made["data"].decode("utf-8"))
-        check(made["owner"] == "gis_admin"
+        check(made["owner"] == "pubadmin"
               and made["type"] == "Code Attachment"
               and made["tags"] == ["whobreaks", "whobreaks-" + TARGET]
               and made["file"] == "whobreaks-graph-%s.json" % TARGET
@@ -4832,6 +5081,9 @@ def self_test():
               "the item belongs to the signed-in user, is a Code "
               "Attachment with the two tags, and carries the file name the "
               "target gives it")
+        check(made["typeKeywords"] == "Desktop",
+              "the addItem call carried the type keyword, and the stand-in "
+              "would have refused it without one  <-- pinned defect")
         check(first_graph["target"] == TARGET
               and first_graph["complete"] is False
               and len(first_graph["unread"]) == 2,
@@ -4854,7 +5106,7 @@ def self_test():
         try:
             code, seen = captured(lambda: main(
                 ["--url", WIDE_URL, "--target", TARGET, "--username",
-                 "gis_admin", "--publish", added[0].upper(), "--apply"]))
+                 "pubadmin", "--publish", added[0].upper(), "--apply"]))
         finally:
             del os.environ[SECRET_ENV]
         second_graph = json.loads(made["data"].decode("utf-8"))
@@ -4869,14 +5121,19 @@ def self_test():
         check(not any(path.endswith("/addItem")
                       for path in server.seen[mark:]),
               "the replace never called addItem")
+        check(len(server.updates) == 1 and "type" not in server.updates[0]
+              and "typeKeywords" not in server.updates[0]
+              and "token" in server.updates[0],
+              "and its update request carried neither the type nor the type "
+              "keywords, which an update must not change  <-- pinned defect")
 
         # an id that is not this tool's item is refused, and nothing is sent
         keep = b"keep me"
         for iid, owner, itype, tags in (
                 ("a1" * 16, "ann", "Code Attachment",
                  ["whobreaks", "whobreaks-" + TARGET]),
-                ("a2" * 16, "gis_admin", "Web Map", ["whobreaks"]),
-                ("a3" * 16, "gis_admin", "Code Attachment",
+                ("a2" * 16, "pubadmin", "Web Map", ["whobreaks"]),
+                ("a3" * 16, "pubadmin", "Code Attachment",
                  ["whobreaks", "whobreaks-" + OTHER])):
             server.stored[iid] = {"id": iid, "owner": owner, "type": itype,
                                   "tags": tags, "title": "t",
@@ -4903,10 +5160,26 @@ def self_test():
               "the same refusal through the command line is exit 2 with a "
               "message, and the web map is untouched  <-- pinned defect")
 
+        # the stand-in refuses a Code Attachment with no type keyword
+        stored_before = len(server.stored)
+        no_keyword = dict(publish_fields(TARGET, "t", True), token=LIVE_TOKEN)
+        del no_keyword["typeKeywords"]
+        server.upload = ("file", "x.json", b"{}", "application/json")
+        message = fails(lambda: _call(
+            LIVE, "content/users/pubadmin/addItem", no_keyword, post=True,
+            secret=LIVE_TOKEN, upload=("file", "x.json", b"{}")),
+            "an addItem of a Code Attachment with no type keyword is refused "
+            "by the stand-in, as the Esri item types page says it must be  "
+            "<-- pinned defect")
+        check("needs a type keyword" in message
+              and len(server.stored) == stored_before,
+              "and nothing was stored for it")
+
         # what the portal can do wrong
         for mode, want in (("refuse", "Unable to add item"),
                            ("failed", "did not accept"),
                            ("noid", "did not accept"),
+                           ("falseid", "did not accept"),
                            ("corrupt", "different bytes")):
             server.mode = mode
             try:
@@ -4950,22 +5223,133 @@ def self_test():
         try:
             odd_id, _size = publish_graph(LIVE, LIVE_TOKEN, second_graph)
         finally:
-            server.who = {"username": "gis_admin"}
+            server.who = {"username": "pubadmin"}
         check(server.stored[odd_id]["owner"] == "pat#1@example.org",
               "a user name with a # and an @ is quoted into the path, or the # "
               "ends the url there  <-- pinned defect")
         fails(lambda: publish_graph(LIVE, "stale-token", second_graph),
               "an expired token ends the publish before anything is sent")
-        fails(lambda: _call(LIVE, "content/users/gis_admin/addItem",
+        fails(lambda: _call(LIVE, "content/users/pubadmin/addItem",
                             {"token": "stale-token"}, post=True),
               "and the portal itself refuses a bad token on addItem")
         nowhere = fails(lambda: _call(LIVE, "content/nowhere", {}),
                         "a REST path that is neither a search, an item nor a "
                         "user's content raises")
         check("unhandled content/nowhere" in nowhere, "and names that path")
-        fails(lambda: _call(LIVE, "content/users/gis_admin/items/%s/update"
+        fails(lambda: _call(LIVE, "content/users/pubadmin/items/%s/update"
                             % ("9" * 32), {"token": LIVE_TOKEN}, post=True),
               "an update of an item that does not exist is refused")
+
+        # the sweep after a publish does not read the graph as a reference
+        LONE_URL = LIVE + "/lone"
+        lone_argv = ["--url", LONE_URL, "--target", TARGET, "--token",
+                     LIVE_TOKEN]
+        stored_before = set(server.stored)
+        code, seen = captured(lambda: main(lone_argv))
+        check(code == 0 and "no item in the 1 searched references" in seen,
+              "an organization in which nothing references the target exits 0")
+        lone_graph = os.path.join(workdir, "lone1.json")
+        code, seen = captured(lambda: main(
+            lone_argv + ["--graph", lone_graph, "--publish", "--apply"]))
+        fresh = sorted(set(server.stored) - stored_before)
+        check(code == 0 and len(fresh) == 1,
+              "and so does the run that publishes the graph of it")
+        server.listed = list(fresh)
+        lone_graph2 = os.path.join(workdir, "lone2.json")
+        code, seen = captured(lambda: main(
+            lone_argv + ["--graph", lone_graph2, "--publish", fresh[0],
+                         "--apply"]))
+        first_size = len(server.stored[fresh[0]]["data"])
+        check(code == 0 and "MENTION" not in seen
+              and "no item in the 1 searched references" in seen,
+              "the next run, which now finds the published graph in the "
+              "search, still exits 0 and reports no mention of the target  "
+              "<-- pinned defect")
+        check(fresh[0] in seen and "not searched" in seen,
+              "and it says which item it left out and why, so the omission is "
+              "visible")
+        code, seen = captured(lambda: main(
+            lone_argv + ["--graph", lone_graph2, "--publish", fresh[0],
+                         "--apply"]))
+        check(code == 0 and len(server.stored[fresh[0]]["data"]) == first_size,
+              "and a third run publishes a file of the same size, because the "
+              "graph no longer holds an edge to the graph of the run before "
+              "it  <-- pinned defect")
+        with io.open(lone_graph2, encoding="utf-8") as handle:
+            lone_two = json.load(handle)
+        check(lone_two["edges"] == [] and lone_two["items"]
+              == ["c1" + "0" * 30],
+              "the graph holds no edge and no item for its own published copy, "
+              "so the next --compare prints no bogus mention  <-- pinned defect")
+        # exit 0 needs a credential, the whole organization and the target
+        saved_env = dict((k, v) for k, v in os.environ.items()
+                         if k == TOKEN_ENV)
+        os.environ.pop(TOKEN_ENV, None)
+        try:
+            code, seen = captured(lambda: main(
+                ["--url", LONE_URL, "--target", TARGET]))
+        finally:
+            os.environ.update(saved_env)
+        check(code == 2 and "no token was sent" in seen
+              and "no item in the 1 searched" in seen,
+              "an anonymous sweep that finds nothing exits 2 and says it saw "
+              "public items only, because a private app that uses the target "
+              "would not have been seen  <-- pinned defect")
+        code, seen = captured(lambda: main(
+            lone_argv + ["--query", "orgid:REALORG"]))
+        check(code == 2 and "--query limited the search" in seen,
+              "a --query on a clean sweep is exit 2, even when it names the "
+              "whole organization, because the tool cannot tell  "
+              "<-- pinned defect")
+        no_target = argparse.Namespace(query=None)
+        check(sweep_caveats(no_target, "t", TARGET, {}) == [
+            "the target itself was not among the 0 item(s) searched"]
+            and sweep_caveats(no_target, "t", TARGET, {TARGET.upper(): {}})
+            == [] and len(sweep_caveats(argparse.Namespace(query="q"), None,
+                                        TARGET, {})) == 3,
+              "a sweep that does not contain the target itself is a caveat of "
+              "its own, a target id in upper case counts as present, and the "
+              "three reasons are independent  <-- pinned defect")
+        clean = Report(TARGET, [], 3, [], [], caveats=["why"])
+        check(exit_code(clean) == 2 and exit_code(Report(TARGET, [], 3, [],
+                                                          [])) == 0
+              and exit_code(Report(TARGET, [{"kind": HARD, "id": "x"}], 3, [],
+                                   [], caveats=["why"])) == 1,
+              "a caveat turns an empty result into exit 2 and leaves a found "
+              "reference at exit 1  <-- pinned defect")
+        check(build_document(PORTAL, "q", TARGET, "t", clean)["caveats"]
+              == ["why"] and "an all clear" in "\n".join(describe(clean)),
+              "and the report document and the console both carry the "
+              "reason  <-- pinned defect")
+
+        # an item that only borrows the tag and the type is still searched
+        forged = "dd" * 16
+        server.stored[forged] = {
+            "id": forged, "owner": "ann", "type": PUBLISH_TYPE,
+            "tags": ["whobreaks", "whobreaks-" + TARGET], "title": "t",
+            "access": "org", "data": ('{"note": "%s"}' % TARGET).encode(),
+            "ctype": "application/json"}
+        server.listed = [fresh[0], forged]
+        code, seen = captured(lambda: main(lone_argv))
+        check(code == 1 and "MENTION ONLY" in seen and forged in seen
+              and "not searched, because each is the graph this tool "
+              "published for the target: %s" % fresh[0] in seen,
+              "and an item that carries the tag and the type but whose file is "
+              "not a graph of this target is still reported  "
+              "<-- pinned defect")
+        server.listed = []
+
+        # two graph files write no report and no graph
+        ignored = os.path.join(workdir, "ignored.json")
+        for flag in ("--out", "--graph"):
+            code, seen = captured(lambda: main(
+                ["--compare", graph_zero, graph_one, flag, ignored,
+                 "--apply"]))
+            check(code == 64 and "would be ignored" in seen
+                  and not os.path.exists(ignored),
+                  "two --compare files with %s are refused, because the file "
+                  "would never be written and the run would look as if it "
+                  "had been  <-- pinned defect" % flag)
 
         # usage errors, which never reach the portal
         saved_token = dict((k, v) for k, v in os.environ.items()
@@ -4983,7 +5367,7 @@ def self_test():
               "any request  <-- pinned defect")
         code, seen = captured(lambda: main(
             ["--url", LIVE, "--target", TARGET, "--token", LIVE_TOKEN,
-             "--publish", "Permits", "--apply"]))
+             "--publish", "Sites", "--apply"]))
         check(code == 64 and "item id" in seen and len(server.seen) == before,
               "--publish with something that is not an item id is refused "
               "before any request  <-- pinned defect")
@@ -5284,7 +5668,7 @@ def _parse(argv):
         allow_abbrev=False,
     )
     ap.add_argument("--url",
-                    help="portal url, e.g. https://county.maps.arcgis.com")
+                    help="portal url, e.g. https://yourorg.maps.arcgis.com")
     ap.add_argument("--target",
                     help="item id whose references you want, 32 hex characters")
     ap.add_argument("--query",
@@ -5413,6 +5797,28 @@ def _dashboard_problem(args, graphs):
     return None
 
 
+def sweep_caveats(args, token, target, items):
+    """The reasons an empty result of this sweep is not an all clear.
+
+    A person who deletes on exit 0 has to be able to rely on it. So exit 0
+    means: signed in, the whole organization, and the target itself among the
+    items searched. The last one catches a query or a credential that cannot
+    see where the target lives, which sweeps zero items and still finds none.
+    """
+    reasons = []
+    if not token:
+        reasons.append("no token was sent, so only public items were "
+                       "searched and a private item that uses the target was "
+                       "not seen")
+    if args.query:
+        reasons.append("--query limited the search to the items it matches, "
+                       "not to the whole organization")
+    if target not in set(("%s" % iid).lower() for iid in items):
+        reasons.append("the target itself was not among the %d item(s) "
+                       "searched" % len(items))
+    return reasons
+
+
 def _run(args):
     """Everything main() does after the self-test, as an exit code."""
     if args.compare and len(args.compare) > 2:
@@ -5428,6 +5834,11 @@ def _run(args):
         if args.publish is not None:
             print("error: --publish needs a sweep and a portal, and two graph "
                   "files are compared offline.", file=sys.stderr)
+            return 64
+        if args.out or args.graph:
+            print("error: two graph files are compared offline and no report "
+                  "or graph is made, so --out and --graph would be ignored. "
+                  "Only --dashboard is written from them.", file=sys.stderr)
             return 64
         problem = args.dashboard and _dashboard_problem(args, args.compare)
         if problem:
@@ -5566,7 +5977,8 @@ def _run(args):
         report = inspect(target, items,
                          portal_reader(args.url, token, args.insecure),
                          echo=say,
-                         unproven=unproven + extra, url=needle)
+                         unproven=unproven + extra, url=needle,
+                         caveats=sweep_caveats(args, token, target, items))
     except (RuntimeError, ValueError) as exc:
         # ValueError is how the enumeration rejects a page it cannot trust: a
         # result with no id, a nextStart that does not advance. Those come from
