@@ -35,7 +35,8 @@ portal as one item, and a scheduled sweep with `--publish <item id>` replaces th
 file each week, so its contents move when the dependencies do. It is the
 only flag in this tool that writes to the organization, it needs `--apply`, and it refuses to
 overwrite any item that this tool did not make for the same target. The next sweep does not
-count that item as a reference: it recognises its own graph, leaves it out and says so.
+count that item as a reference: it recognises a graph this tool published, for this target or
+for another, leaves it out and says so.
 
 A reference by service url is the other half. A dependency tool can resolve a url that it
 finds inside an item by requesting that url with the admin session. Then any item author can
@@ -194,9 +195,15 @@ PASS  the token never reaches stdout  <-- pinned defect
 ...
 PASS  a complete sweep that found a reference exits 1  <-- pinned defect
 ...
-PASS  a sweep that finds nothing, and read everything it found, is the only run that exits 0  <-- pinned defect
+PASS  an organization in which nothing references the target exits 0
 ...
 PASS  no credential reaches the file on disk  <-- pinned defect
+...
+PASS  a body the connection cut short is a problem, because HTTPResponse.read does not raise and the half was searched as if it were the whole  <-- pinned defect
+...
+PASS  a token whose user is not an administrator cannot search another user's private items, so a clean sweep is exit 2  <-- pinned defect
+PASS  and the graph file carries the caveat next to complete  <-- pinned defect
+PASS  and the page does not show the green banner, nor claim that nothing loads the target  <-- pinned defect
 PASS  and the json comes out with its keys in order, so two runs a week apart diff to the findings that changed  <-- pinned defect
 ...
 PASS  with no blank line between rows: the defect DOUBLES the carriage return, it does not add a whole empty line, so that is the sequence asserted on  <-- pinned defect
@@ -259,10 +266,10 @@ PASS  a prefix of --dashboard is refused, because it names a file the run will w
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-653 assertions, 0 failed
+730 assertions, 0 failed
 ```
 
-The full run prints all 653 assertions. It printed the same 653 lines on Windows under
+The full run prints all 730 assertions. It printed the same 730 lines on Windows under
 Python 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this
 block is cut.
 
@@ -496,8 +503,10 @@ Every item was read.
 The page also lists every edge of the sweep, worst class first. It follows the same rules as the
 console report. A break travels along hard edges only, so the filter board is listed under
 `Reference the target without breaking` and also at hop 2, because it loads the web map. A graph
-that is not complete puts `NOT COMPLETE` and every reason in a box at the top, and the unread
-items in their own table. A page made from an incomplete sweep says so at the top.
+that is not complete, or that carries a caveat such as a token that is not an administrator's,
+puts `NOT COMPLETE` and every reason in a box at the top, and the unread items in their own
+table. The empty table under the hard breaks then says that no hard reference was found and that
+the sweep is not an all clear. The green banner is for a graph with neither.
 
 With two graph files, the page is made offline from the second one and the first one is the
 earlier graph. This makes no request to the portal. A graph file holds item ids and no titles, so
@@ -579,9 +588,10 @@ password comes from `WHOBREAKS_PASSWORD`. Publishing does not change the exit co
 sweep. The next sweep of the same organization finds the published graph in the search. Its
 title, description and file all name the target, so it would be read as a mention and a
 scheduled run would exit 1 for ever. The sweep leaves it out instead, when four things hold:
-its type is `Code Attachment`, it carries both tags, it was read without a problem, and its file
-is a graph of this same target. It then prints `not searched, because each is the graph this tool
-published for the target` and the id, so the omission is visible. An item that only borrows the
+its type is `Code Attachment`, it carries the `whobreaks` tag and a `whobreaks-<target>` tag, it was read without a problem, and its file
+is a graph of the target its second tag names. It then prints `not searched, because each is a
+graph this tool published` and the id, so the omission is visible. The graph of another target
+lists every item of its sweep, this sweep's target among them, so it is left out as well. An item that only borrows the
 tag and the type is still searched. The fourth run exits 2, because a failed publish is an
 incomplete job. The item that the first `--apply` run made was this, on the stand-in: owned by
 the signed-in user, type `Code Attachment`, type keyword `Desktop`, title
@@ -731,7 +741,8 @@ It refuses, or reports as unknown, rather than guessing:
 - **A thumbnail url is not a reference.** An item card, a gallery entry and a story cover all
   store another item's thumbnail url, and that url contains that item's id. A substring scan
   reported 300 of those as breaks on a real organization. This tool checks the key name and the
-  url shape, and reports none of them.
+  url shape, and reports none of them. The url shape counts only on a portal item url, one with
+  `/content/items/` in it, so a service that is itself called `Thumbnail` is still a reference.
 - **An id inside a longer id is not a reference.** The match has to be a whole token: what
   precedes and follows it cannot be a letter or a digit.
 - **A malformed `--target` is refused** before the first request. A truncated id is a shorter
@@ -742,6 +753,11 @@ It refuses, or reports as unknown, rather than guessing:
 - **An item that was read in part is not a clean item either.** A `/data` body or a resource
   over 4 MB is searched to 4 MB, and the item is unread, because the id can sit past the cap. An
   item with more than 50 JSON resources is read to 50 and is unread for the same reason.
+- **A body that the connection cut short is not a clean item.** Python's `HTTPResponse.read(n)`
+  does not raise when the connection closes before `Content-Length` bytes arrive, so half a
+  configuration was searched as if it were the whole of it. The tool now compares the bytes it
+  got with `Content-Length`, and the item is unread. The self-test drives this over a real
+  socket, with a stand-in that promises 5,000 bytes, sends 35 and closes.
 - **A search that hits the 10,000 result ceiling is not a complete enumeration.** The sweep
   splits the created-date range and re-asks. When the pages of one query disagree about the
   total, the largest count any page reported is the one believed, so a later small number
@@ -770,35 +786,42 @@ It refuses, or reports as unknown, rather than guessing:
 
 | Code | Means |
 |---|---|
-| 0 | nothing references the target, every item was enumerated and read, a credential was sent, no `--query` was given, and the target itself was among the items searched. The last three are the conditions under which an empty result means an empty organization |
+| 0 | nothing references the target, every item was enumerated and read, an administrator's token was sent, no `--query` was given, and the target itself was among the items searched. The last three are the conditions under which an empty result means an empty organization |
 | 1 | something references it, listed worst first |
-| 2 | the sweep could not be completed, so nothing can be concluded. Also an empty result with no token, with a `--query`, or with a target that was not among the items searched. An item was unreadable or read in part, the target item itself was unreadable, a search slice sat on the 10,000 ceiling, or a search page held a result with no usable id. Also when `--apply` could not write a file it was asked for, the page included, when `--publish` was refused or could not be confirmed by reading the item back, and when the tool met a failure it did not foresee |
+| 2 | the sweep could not be completed, so nothing can be concluded. Also an empty result with no token, with a token whose user is not an administrator, with a `--query`, or with a target that was not among the items searched. An item was unreadable or read in part, the target item itself was unreadable, a search slice sat on the 10,000 ceiling, or a search page held a result with no usable id. Also when `--apply` could not write a file it was asked for, the page included, when `--publish` was refused or could not be confirmed by reading the item back, and when the tool met a failure it did not foresee |
 | 64 | usage error, including a flag that is unknown or has a bad value, a graph file that is missing, is not a graph, or covers a different scope, and an `--out`, `--graph` or `--dashboard` that is a folder or that names one file twice, and a `--dashboard` that names a graph file the run reads. Also a `--publish` with no token, with a value that is not an item id, or with two `--compare` files |
 
 `--depth` and a one-file `--compare` do not change the exit code of the sweep. A two-file
 `--compare` exits 0 when no edge changed and 1 when an edge did. It exits 2 when either graph is
-incomplete, whatever the diff says, because an edge missing from that graph is not proof. It also
+incomplete or carries a caveat, whatever the diff says, because an edge missing from that graph is not proof. It also
 exits 2 when an edge is unknown. That is what a deleted map leaves behind in the app that still
 loads it.
 
 Exit 2 beats exit 1 on purpose. Somebody who sees 1 goes and looks at the items. Somebody who
 sees 0 deletes the item, so 0 has to mean the sweep was complete, not that it finished.
 
-Three more conditions block exit 0 and nothing else. A sweep with no token sees only public
-items, so a private app that uses a public service would not be seen. A sweep with a `--query`
+Four more conditions block exit 0 and nothing else. A sweep with no token sees only public
+items, so a private app that uses a public service would not be seen. A sweep whose token
+belongs to a user who is not an administrator cannot search another user's private items, and
+looks exactly like a clean sweep. A sweep with a `--query`
 covers only what the query matches, and the tool cannot tell a query that names the whole
 organization from one that leaves the referencing item out. A sweep whose items do not include
 the target itself has been pointed at the wrong place or cannot see where the target lives. In
 each case an empty result exits 2 and the output lists the reason. A reference that was found
 still exits 1, because it is true whatever else was missed. The same reasons are in the `caveats`
-list of the `--out` document. The `--graph` file and the dashboard's "Complete" banner say
-whether every item was enumerated and read, which is a different question, so they do not carry
-them. Leave out `--query` and sign in to get exit 0.
+list of the `--out` document and of the `--graph` file, next to `complete`. `complete` says every
+item was enumerated and read. A caveat says the sweep could not see everything anyway. The
+dashboard shows its green banner only when `complete` is true and the list is empty, and a
+graph with a caveat gets the `NOT COMPLETE` box with the reasons in it. A two-file `--compare`
+exits 2 for such a graph, and the description of a published item says `NOT COMPLETE`. A graph
+file from before this field has no `caveats` and is read as having none. Leave out `--query` and
+sign in as an administrator to get exit 0.
 
-A token does not make the sweep complete either. A non-administrator token covers what that user
-can search, and the tool cannot see the difference, so an empty result for such a token is exit 0
-and is only as good as the account's view of the organization. Use an administrator's token for
-a sweep that gates a delete.
+The role comes from `portals/self`. Esri documents `user.role` there as `org_admin`,
+`org_publisher` or `org_user`, and says the user object is returned only when a token is passed
+in. Any role but `org_admin` is a caveat, and so is a portal that reports none. A custom role is
+not in that list, so it is a caveat too, even if the portal gives it administrator privileges.
+https://developers.arcgis.com/rest/users-groups-and-items/portal-self/
 
 ## Output
 
@@ -830,15 +853,16 @@ The item that `--publish` makes holds the same document as the `--graph` file, w
 order. See "Publishing the graph" above.
 
 The `--graph` file holds `edges`, each with `from`, `to` and `kind`, sorted by `from` and then
-`to`. The flags are next to them: `complete`, `unread` (the ids of the items that could not be
+`to`. The flags are next to them: `complete`, `caveats` (the reasons an empty sweep is not an all
+clear), `unread` (the ids of the items that could not be
 read), `items` (the ids of every item searched) and `unproven`. The file also records `url`, `query`, `target`, `service_url`, `scanned`
 and `taken`. The self-test asserts that no credential reaches this file either.
 
 ## Limits
 
 - It searches the organization you can see. An anonymous sweep covers public items, and a sweep
-  as a non-administrator covers what that user can search. The answer is honest about the query,
-  not about the organization.
+  as a user who is not an administrator covers what that user can search. Both exit 2 when they
+  find nothing. The answer is honest about the query, not about the organization.
 - It reads JSON resources only, and at most 50 of them per item. An item id inside a PNG, a
   mobile map package or a file geodatabase in an item's resources is not found. An item with
   more than 50 JSON resources is reported as unread.
@@ -918,6 +942,67 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   account signs in as that account.
 - Group membership, folder structure and sharing are out of scope. This tool answers one
   question: what would break.
+- A sweep covers items created up to the clock of the machine that runs it, so an item created
+  after that moment, or dated in the future, is not searched. The count still matches, so the run
+  can exit 0.
+- Only `--dashboard` is checked against the `--compare` file. `--out` or `--graph` naming it
+  replaces the baseline with a report or a new graph, and the next run exits 64 with `is not a
+  whobreaks graph file`.
+- `--out` and `--graph` are written in place, not by rename like the dashboard. A write that fails
+  midway, such as a full disk, leaves a truncated file, and a truncated `--graph` baseline makes
+  the next `--compare` exit 64 until the file is written again.
+- A scheduled `--graph X --compare X` overwrites the last complete baseline with the graph of a
+  sweep that could not read everything, and the next diff then shows mostly unknown edges. Keep
+  the last complete graph under another name.
+- `diff_graphs` checks that the item an edge names was in both sweeps, but not that the item
+  holding the reference was. An app that drops out of the sweep without being deleted, because the
+  sweeping account lost sight of it, prints as a removed reference.
+- `--format csv` does not neutralise a leading `=`, `+`, `-` or `@` in a title or an excerpt, so a
+  spreadsheet may evaluate an item owner's text as a formula. Open the file as text, or use json.
+- `--apply` with a two-file `--compare` and no `--dashboard` is accepted and writes nothing, with
+  no message.
+- `--out`, `--graph` and `--dashboard` are compared without regard to case on every host. On Linux
+  `report.json` and `Report.json` are two files, and the run refuses them as one with exit 64.
+- A published graph is recognised by its type, its tags and its file, and not by its owner. Anyone
+  who can add an item can copy those three markers and hide that item, and every reference in its
+  other resources, from the sweep. Another user's copy of a graph for the same target is left out
+  as well.
+- `json.loads` keeps the last of two duplicate keys in a body, so a reference under the first copy
+  is not seen.
+- The dashboard has no age marker. If the scheduled sweep starts to fail with exit 2, the page
+  keeps showing the last good graph, with the graph-taken date as the only clue.
+- The published item is the graph as a JSON file, so watching it in the portal means opening that
+  file. The HTML page is a local file only, and `--publish` does not upload it.
+- Only resources whose names end in `.json` are read. Text resources such as `readme.txt`,
+  `app.js` or `metadata/metadata.xml` are never searched, and the item is not marked unread for
+  them.
+- The scrubber does not match a percent-encoded key such as `token%3D`, so an encoded token inside
+  the 1 KB window around the target id can reach an excerpt.
+- Only a value after a key name the scrubber knows is replaced. A bare `key=VALUE`, an Esri API
+  key that starts `AAPK`, `credentials:` and `sessionid=` values next to the target id are printed
+  and written as they are.
+- Item titles are not scrubbed, so a title that holds a credential-shaped string such as
+  `access_token=...` is printed and written as it is.
+- `--username` sends the password to `generateToken` before the `--apply` check. That call signs
+  in and writes nothing to the organization, but it is a POST.
+- `--token` with an `http://` url on a host that is not loopback sends the token in the query
+  string in clear. Only `--username` is refused on `http://`.
+- `urllib` follows a redirect from the portal to another host with the token still in the query
+  string, and the tool does not stop it. Trust the portal url and any proxy in front of it.
+- A search-result id and a resource name from an item are put in the request path as they are. A
+  resource name that holds `../` can make a read of another endpoint on the same portal host with
+  your token. It is a GET, and never another host.
+- With `--username` and no `WHOBREAKS_PASSWORD`, `getpass` reads the console and not stdin, so on
+  Windows a piped or scheduled run with no console waits for a password that never comes. Set
+  `WHOBREAKS_PASSWORD` for unattended runs.
+- A token made by `--username` lasts 60 minutes. A sweep that runs longer reads every later item
+  as unread and exits 2 instead of finishing. Pass a longer-lived token in `WHOBREAKS_TOKEN` for a
+  big organization.
+- Esri's Item Data page does not say what `/data` returns for an item with no data file, such as a
+  feature service. If a real portal answers those with an error, every such item is unread and
+  every sweep exits 2. That is a safe failure, and it was not tried on a real portal.
+- The description of `f1729/whobreaks` in "Related" was checked against that repository's GitHub
+  description only, not against its code.
 
 ## Contributing
 

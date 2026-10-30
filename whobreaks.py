@@ -435,12 +435,18 @@ def is_thumbnail_context(path, token):
     url, which catches a thumbnail url stored under a key this tool has never
     heard of, because every portal thumbnail url carries the item's own
     /info/thumbnail path.
+
+    The token test only applies to a portal item url, /content/items/. A
+    service called Thumbnail, or a folder called info that holds a service
+    called Thumbnails, is an ordinary hard reference and was dropped as a
+    picture, which let a sweep exit 0.
     """
     for key in path:
         if ("%s" % (key,)).lower() in THUMB_KEYS:
             return True
     low = ("%s" % (token,)).lower()
-    return "/info/thumbnail" in low or "/thumbnail/" in low
+    return "/content/items/" in low and (
+        "/info/thumbnail" in low or "/thumbnail/" in low)
 
 
 def classify(path, token):
@@ -921,22 +927,26 @@ class Report(object):
             self.target, len(self.items), self.scanned, len(self.unread))
 
 
-def is_own_graph(target, meta, payloads):
-    """True when an item is the graph --publish made for this target.
+def is_own_graph(meta, payloads):
+    """True when an item is a graph --publish made, for any target.
 
     The tag and the type are what publish_fields() sets, and the file has to
-    be a graph of this target as well, so that an item which only borrows the
-    tag is still searched. Without this the sweep after a --publish read the
-    graph, which names the target in its title, its description and its file,
-    and reported it as a reference. A scheduled run then exited 1 for ever.
+    be a graph of the target the second tag names, so that an item which only
+    borrows the tag is still searched. Without this the sweep after a
+    --publish read the graph, which names the target in its title, its
+    description and its file, and reported it as a reference. A scheduled run
+    then exited 1 for ever. The graph of ANOTHER target lists every item id
+    of its sweep, including this sweep's target, so it is left out as well.
     """
     tags = meta.get("tags")
     if meta.get("type") != PUBLISH_TYPE or not (
-            isinstance(tags, list) and PUBLISH_TAG in tags
-            and "%s-%s" % (PUBLISH_TAG, target) in tags):
+            isinstance(tags, list) and PUBLISH_TAG in tags):
         return False
+    named = set(tag[len(PUBLISH_TAG) + 1:] for tag in tags
+                if isinstance(tag, str)
+                and tag.startswith(PUBLISH_TAG + "-"))
     return any(isinstance(body, dict) and body.get("whobreaks_graph") == 1
-               and body.get("target") == target for _source, body in payloads)
+               and body.get("target") in named for _source, body in payloads)
 
 
 def inspect(target, items, reader, echo=None, unproven=(), url=None,
@@ -982,7 +992,7 @@ def inspect(target, items, reader, echo=None, unproven=(), url=None,
             # not what it claimed. None of them are a reason to stop reading
             # the other 9,000 items, and all of them make this item unread.
             problem = scrub("%s" % (exc,))
-        if not problem and is_own_graph(target, meta, payloads):
+        if not problem and is_own_graph(meta, payloads):
             own.append(iid)
             continue
         scanned += 1
@@ -1137,8 +1147,8 @@ def describe(report, depth=1):
                        "exit code is 2.")
     if report.own:
         out.append("")
-        out.append("%d item(s) not searched, because each is the graph this "
-                   "tool published for the target: %s"
+        out.append("%d item(s) not searched, because each is a graph this "
+                   "tool published: %s"
                    % (len(report.own), ", ".join(report.own)))
     if report.unread:
         out.append("")
@@ -1227,12 +1237,27 @@ def build_graph(url, query, target, taken, report, service_url=None):
         "scanned": report.scanned,
         "unread": sorted(row["id"] for row in report.unread),
         "unproven": list(report.unproven),
+        # Reasons an empty sweep is not an all clear. Without them in the
+        # file, a page or a compare made from it said "complete" of a sweep
+        # that exited 2.
+        "caveats": list(report.caveats),
         # Every item searched. An edge is only recorded to an item of the
         # sweep, so a diff has to know whether the item an edge names was
         # there to be named at all.
         "items": sorted(report.names),
         "edges": [dict(edge) for edge in report.edges],
     }
+
+
+def graph_trusted(graph):
+    """True when a graph's sweep read everything AND carried no caveat.
+
+    complete says every item was enumerated and read. A caveat says the
+    sweep could not see everything anyway: no token, a --query, a target not
+    among the items, a token that is not an administrator's. Both have to be
+    clear before a page, a compare or a published item may say all is well.
+    """
+    return bool(graph.get("complete")) and not graph.get("caveats")
 
 
 def load_graph(path):
@@ -1259,6 +1284,12 @@ def load_graph(path):
                 or edge["kind"] not in RANK):
             raise ValueError("%s holds an edge this tool did not write: %r"
                              % (path, edge))
+    caveats = body.get("caveats", [])
+    if (not isinstance(caveats, list)
+            or not all(isinstance(why, str) for why in caveats)):
+        raise ValueError("%s has caveats that are not a list of text, so a "
+                         "diff could not tell a clean sweep from one that "
+                         "could not see everything" % path)
     for field, why in (("unread", "tell a 403 from a fix"),
                        ("items", "tell an item that left the sweep from a "
                                  "reference that was removed")):
@@ -1329,6 +1360,10 @@ def describe_diff(old, new, added, removed, unknown):
         if not graph.get("complete"):
             out.append("the %s graph is NOT complete, so an edge missing from "
                        "it is not proof that the reference is gone" % name)
+        if graph.get("caveats"):
+            out.append("the %s graph carries caveats (%s), so an edge missing "
+                       "from it is not proof that the reference is gone"
+                       % (name, "; ".join(graph["caveats"])))
     return out
 
 
@@ -1412,12 +1447,13 @@ def render_dashboard(graph, previous=None, names=None, depth=1):
         return "unknown" if value is None else value
 
     body = ["<h1>Who breaks if %s goes</h1>" % _h(target)]
-    if graph["complete"]:
+    if graph_trusted(graph):
         body.append('<div class="banner ok">Complete: every item was '
                     'enumerated and read.</div>')
     else:
         why = ["%d item(s) could not be read" % len(unread)] if unread else []
         why.extend(unproven)
+        why.extend(graph.get("caveats") or [])
         body.append('<div class="banner bad">NOT COMPLETE. %s. An edge missing '
                     'from this page is not proof that nothing references the '
                     'target.</div>' % _h("; ".join(why) or "the sweep was "
@@ -1438,7 +1474,10 @@ def render_dashboard(graph, previous=None, names=None, depth=1):
                 reached.items(), key=lambda one: (one[1][0], one[0]))]
     body.append("<h2>Breaks if the target is deleted, to depth %d</h2>" % depth)
     body.append(_table(("hop", "item", "title", "type", "loads"), rows,
-                       "No item loads the target through a hard reference."))
+                       "No item loads the target through a hard reference."
+                       if graph_trusted(graph) else
+                       "No hard reference was found, but this sweep is not an "
+                       "all clear. Read the banner."))
     if beyond:
         body.append('<p class="foot">%d more item(s) load one at hop %d. Raise '
                     '--depth to follow them.</p>' % (beyond, depth + 1))
@@ -1468,6 +1507,11 @@ def render_dashboard(graph, previous=None, names=None, depth=1):
                 body.append('<p class="foot">The %s graph is not complete, so '
                             'an edge missing from it is not proof that the '
                             'reference is gone.</p>' % name)
+            if older.get("caveats"):
+                body.append('<p class="foot">The %s graph carries caveats (%s)'
+                            ', so an edge missing from it is not proof that '
+                            'the reference is gone.</p>'
+                            % (name, _h("; ".join(older["caveats"]))))
         if unknown:
             body.append('<p class="foot">An unknown edge belongs to an item '
                         'one of the two sweeps could not read, or names an '
@@ -1642,7 +1686,15 @@ def _open(url, path, params, insecure=False, post=False, secret=None,
         else:
             response = opener.open("%s?%s" % (endpoint, data.decode("utf-8")),
                                    timeout=HTTP_TIMEOUT)
-        return response.read(limit)
+        raw = response.read(limit)
+        want = response.headers.get("Content-Length")
+        if want and want.isdigit() and len(raw) < min(int(want), limit):
+            # HTTPResponse.read(n) does not raise when a connection closes
+            # before Content-Length bytes arrive, so a cut body used to be
+            # searched as if it were the whole configuration.
+            raise ValueError("the connection closed after %d of %s bytes"
+                             % (len(raw), want))
+        return raw
     except Exception as exc:
         # Every credential this request carried, not only the caller's secret.
         # urllib quotes the full url back into its own error for a scheme-less
@@ -1877,6 +1929,19 @@ def org_id(url, token, insecure=False):
     return body.get("id")
 
 
+def portal_role(url, token, insecure=False):
+    """The signed-in user's role from portals/self, or None when not reported.
+
+    Esri documents user.role as org_admin, org_publisher or org_user, and
+    says the user object is returned only when a token is passed in.
+    """
+    body = _call(url, "portals/self", {"token": token}, insecure=insecure,
+                 secret=token)
+    user = body.get("user")
+    role = user.get("role") if isinstance(user, dict) else None
+    return role if isinstance(role, str) else None
+
+
 def item_url(url, token, target, insecure=False):
     """The target item's own url, read once from the portal, or None.
 
@@ -1922,7 +1987,8 @@ def publish_fields(target, taken, complete):
                        "whobreaks. It is not shared by whobreaks."
                        % (target, taken,
                           "Complete." if complete else
-                          "NOT COMPLETE: read the unread list before use."),
+                          "NOT COMPLETE: read the caveats and the unread list "
+                          "in the file before use."),
     }
 
 
@@ -1955,7 +2021,8 @@ def publish_graph(url, token, graph, item=None, insecure=False):
     """
     payload = json.dumps(graph, indent=1, sort_keys=True).encode("utf-8")
     user = community_user(url, token, insecure)
-    fields = publish_fields(graph["target"], graph["taken"], graph["complete"])
+    fields = publish_fields(graph["target"], graph["taken"],
+                            graph_trusted(graph))
     if item:
         info = _call(url, "content/items/%s" % item, {"token": token},
                      insecure=insecure, secret=token)
@@ -2233,6 +2300,17 @@ def self_test():
           "<-- pinned defect")
     check(is_thumbnail_context(("url",), "https://services/x/FeatureServer/0")
           is False, "an ordinary service url is not a thumbnail")
+    check(is_thumbnail_context(
+          ("url",), "https://services.example.org/arcgis/rest/services/"
+          "Thumbnail/FeatureServer/0") is False
+          and is_thumbnail_context(
+          ("url",), "https://services.example.org/arcgis/rest/services/info/"
+          "Thumbnails/MapServer") is False
+          and classify(("url",), "https://services.example.org/arcgis/rest/"
+                       "services/Thumbnail/FeatureServer/0") == HARD,
+          "a service called Thumbnail, or one called Thumbnails in a folder "
+          "called info, is a hard reference and not a picture, because only "
+          "a portal item url can be a thumbnail  <-- pinned defect")
     check(classify(("url",), THUMB) is None,
           "so a thumbnail url is not a reference at all  <-- pinned defect")
     check(classify(("operationalLayers", "itemId"), TARGET) == HARD,
@@ -3253,6 +3331,9 @@ def self_test():
     raises(lambda: next_start({"nextStart": 1}, 101, 100),
            "a nextStart that does not advance raises, rather than paging the "
            "same rows for ever")
+    raises(lambda: next_start({"nextStart": 101}, 101, 100),
+           "and so does a nextStart equal to the start it was asked from, the "
+           "page-the-same-rows case the guard is for  <-- pinned defect")
     raises(lambda: next_start({}, 0, 10), "a start of zero raises, start is 1-based")
     raises(lambda: next_start({}, 1, -1), "a negative row count raises")
     check(slice_query("orgid:ORG", 0, 10) == "(orgid:ORG) AND created:[0 TO 10]",
@@ -3439,6 +3520,11 @@ def self_test():
           "url back into its error and that url carries the token  "
           "<-- pinned defect")
     check(is_http_url("") is False, "an empty url is refused")
+    check(is_http_url("ftp://host/x") is False
+          and is_http_url("file:///c:/x") is False
+          and is_http_url("HTTP://host") is True,
+          "a url with another scheme is refused, and the scheme is read "
+          "without regard to case  <-- pinned defect")
     check(decode_body(b'{"a": 1}') == {"a": 1}, "a json body is parsed")
     check(decode_body(b'[1, 2]') == [1, 2], "a json array body is parsed")
     check(decode_body(b"print('hi')") == "print('hi')",
@@ -3562,6 +3648,7 @@ def self_test():
     PART_ID = "9e" + "0" * 30
     PHOTO_ID = "9f" + "0" * 30
     DEEP_ID = "9c" + "0" * 30
+    CUT_ID = "9b" + "0" * 30
     PASSWORD = "hunter2-live"
     LIVE_TOKEN = "LIVE-TOKEN-0123456789"
 
@@ -3720,7 +3807,10 @@ def self_test():
                                                    params.get("password"))}})
                 return self._json({"token": LIVE_TOKEN, "expires": 1})
             if route == "portals/self":
-                return self._json({} if blind else {"id": "REALORG"})
+                body = {} if blind else {"id": "REALORG"}
+                if params.get("token") and self.server.self_user is not None:
+                    body["user"] = self.server.self_user
+                return self._json(body)
             if route == "community/self":
                 if params.get("token") != LIVE_TOKEN:
                     return self._json({"error": {"code": 498, "message":
@@ -3863,6 +3953,14 @@ def self_test():
                 return self._json({"id": iid, "type": "Feature Service",
                                    "url": self.server.service_url})
             if tail == "data":
+                if iid == CUT_ID:
+                    # Promises 5000 bytes, sends 35, then the socket closes.
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "5000")
+                    self.end_headers()
+                    self.wfile.write(b'{"operationalLayers": [{"itemId": "')
+                    return
                 if iid == DEAD_ID:
                     # A real HTTP failure, not an error envelope. urllib raises
                     # this one, which is the path that used to end the sweep.
@@ -3913,6 +4011,7 @@ def self_test():
     server.upload = None
     server.mode = "ok"      # ok, refuse, failed, noid, falseid or corrupt
     server.who = {"username": "pubadmin"}
+    server.self_user = {"role": "org_admin"}    # portals/self user, or None
     thread = threading.Thread(target=server.serve_forever)
     thread.daemon = True
     thread.start()
@@ -4067,6 +4166,17 @@ def self_test():
               and exit_code(deep_report) == 2,
               "so the real hard break in another item of the same sweep is "
               "still reported, and the run exits 2  <-- pinned defect")
+        payloads, problem = read(CUT_ID, 20)
+        check(payloads == [] and "closed after 35 of 5000 bytes" in (problem
+                                                                     or ""),
+              "a body the connection cut short is a problem, because "
+              "HTTPResponse.read does not raise and the half was searched as "
+              "if it were the whole  <-- pinned defect")
+        cut_report = inspect(TARGET, catalog({"id": CUT_ID}), read)
+        check([one["id"] for one in cut_report.unread] == [CUT_ID]
+              and exit_code(cut_report) == 2,
+              "so its item is unread and the run cannot exit 0  "
+              "<-- pinned defect")
         before = len(server.seen)
         anon = portal_reader(LIVE, None)
         anon(MAP_ID, 20)
@@ -5302,10 +5412,10 @@ def self_test():
               "whole organization, because the tool cannot tell  "
               "<-- pinned defect")
         no_target = argparse.Namespace(query=None)
-        check(sweep_caveats(no_target, "t", TARGET, {}) == [
+        check(sweep_caveats(no_target, "t", TARGET, {}, "org_admin") == [
             "the target itself was not among the 0 item(s) searched"]
-            and sweep_caveats(no_target, "t", TARGET, {TARGET.upper(): {}})
-            == [] and len(sweep_caveats(argparse.Namespace(query="q"), None,
+            and sweep_caveats(no_target, "t", TARGET, {TARGET.upper(): {}},
+                                  "org_admin") == [] and len(sweep_caveats(argparse.Namespace(query="q"), None,
                                         TARGET, {})) == 3,
               "a sweep that does not contain the target itself is a caveat of "
               "its own, a target id in upper case counts as present, and the "
@@ -5332,12 +5442,102 @@ def self_test():
         server.listed = [fresh[0], forged]
         code, seen = captured(lambda: main(lone_argv))
         check(code == 1 and "MENTION ONLY" in seen and forged in seen
-              and "not searched, because each is the graph this tool "
-              "published for the target: %s" % fresh[0] in seen,
+              and "not searched, because each is a graph this tool "
+              "published: %s" % fresh[0] in seen,
               "and an item that carries the tag and the type but whose file is "
               "not a graph of this target is still reported  "
               "<-- pinned defect")
         server.listed = []
+
+        # a graph published for another target is not a reference either
+        other_target = "c1" + "0" * 30
+        server.listed = list(fresh)
+        code, seen = captured(lambda: main(
+            ["--url", LONE_URL, "--target", other_target, "--token",
+             LIVE_TOKEN]))
+        check(code == 0 and "MENTION" not in seen and fresh[0] in seen
+              and "not searched" in seen,
+              "the graph published for ANOTHER target lists every item of its "
+              "sweep, this target among them, and is left out as well  "
+              "<-- pinned defect")
+        server.listed = []
+
+        # the caveats of a sweep reach the graph, the page and the compare
+        server.self_user = {"role": "org_user"}
+        caveat_graph = os.path.join(workdir, "caveat.json")
+        caveat_page = os.path.join(workdir, "caveat.html")
+        stored_before = set(server.stored)
+        code, seen = captured(lambda: main(
+            lone_argv + ["--graph", caveat_graph, "--dashboard", caveat_page,
+                         "--publish", "--apply"]))
+        check(code == 2 and "(role: org_user)" in seen
+              and "An empty result is not an all clear" in seen,
+              "a token whose user is not an administrator cannot search "
+              "another user's private items, so a clean sweep is exit 2  "
+              "<-- pinned defect")
+        with io.open(caveat_graph, encoding="utf-8") as handle:
+            caveat_doc = json.load(handle)
+        with io.open(caveat_page, encoding="utf-8") as handle:
+            caveat_text = handle.read()
+        check(caveat_doc["complete"] is True and len(caveat_doc["caveats"]) == 1
+              and "org_user" in caveat_doc["caveats"][0],
+              "and the graph file carries the caveat next to complete  "
+              "<-- pinned defect")
+        check("NOT COMPLETE" in caveat_text and "org_user" in caveat_text
+              and "Complete: every item" not in caveat_text
+              and "this sweep is not an all clear" in caveat_text,
+              "and the page does not show the green banner, nor claim that "
+              "nothing loads the target  <-- pinned defect")
+        made = server.stored[sorted(set(server.stored) - stored_before)[0]]
+        check("NOT COMPLETE" in made["description"],
+              "and the published item's description says NOT COMPLETE  "
+              "<-- pinned defect")
+        code, seen = captured(lambda: main(
+            ["--compare", caveat_graph, caveat_graph]))
+        check(code == 2 and "carries caveats" in seen,
+              "and two such graphs compared offline exit 2, not 0  "
+              "<-- pinned defect")
+        previous_page = render_dashboard(caveat_doc, dict(caveat_doc))
+        check("The previous graph carries caveats" in previous_page
+              and "The current graph carries caveats" in previous_page,
+              "and the page of a compare names the caveats of both graphs")
+        server.self_user = {"role": "org_admin"}
+        caveat_query = os.path.join(workdir, "caveat_q.json")
+        code, seen = captured(lambda: main(
+            lone_argv + ["--query", "orgid:REALORG", "--graph", caveat_query,
+                         "--apply"]))
+        with io.open(caveat_query, encoding="utf-8") as handle:
+            query_doc = json.load(handle)
+        check(code == 2 and query_doc["complete"] is True
+              and len(query_doc["caveats"]) == 1
+              and "--query" in query_doc["caveats"][0],
+              "a --query caveat reaches the graph file as well  "
+              "<-- pinned defect")
+        for body, role in (({"role": "org_admin"}, "org_admin"),
+                           ({"role": "org_publisher"}, "org_publisher"),
+                           ({"role": 5}, None), ({}, None), ("x", None),
+                           (None, None)):
+            server.self_user = body
+            check(portal_role(LIVE, LIVE_TOKEN) == role,
+                  "portals/self user %r gives role %r" % (body, role))
+        server.self_user = {"role": "org_admin"}
+        check(sweep_caveats(argparse.Namespace(query=None), "t", TARGET,
+                            {TARGET: {}}, None)
+              == ["the token's user is not known to be an administrator "
+                  "(role: not reported), so another user's private item "
+                  "that uses the target may not have been seen"],
+              "a portal that does not report the role is a caveat as well  "
+              "<-- pinned defect")
+        check(len(_open(LIVE, "content/items/%s/data" % MAP_ID, {}, limit=10))
+              == 10,
+              "a body longer than the byte cap is returned to the cap and is "
+              "not mistaken for a cut connection  <-- pinned defect")
+        bad_caveats = os.path.join(workdir, "bad_caveats.json")
+        with io.open(bad_caveats, "w", encoding="utf-8") as handle:
+            json.dump(dict(caveat_doc, caveats="x"), handle)
+        raises(lambda: load_graph(bad_caveats),
+               "a graph file whose caveats are not a list of text is refused "
+               "<-- pinned defect")
 
         # two graph files write no report and no graph
         ignored = os.path.join(workdir, "ignored.json")
@@ -5391,6 +5591,47 @@ def self_test():
         server.server_close()
         thread.join(timeout=5)
         shutil.rmtree(workdir, ignore_errors=True)
+
+    # ---- which item is a graph this tool published
+    own_tags = ["whobreaks", "whobreaks-" + TARGET]
+    own_meta = {"type": PUBLISH_TYPE, "tags": own_tags}
+    own_body = {"whobreaks_graph": 1, "target": TARGET}
+    check(is_own_graph(own_meta, [("data", own_body)]) is True
+          and is_own_graph(dict(own_meta, tags=["whobreaks", 5,
+                                                "whobreaks-" + TARGET]),
+                           [("data", own_body)]) is True,
+          "an item of the right type, tag and file is a published graph")
+    check(is_own_graph(dict(own_meta, type="Web Map"), [("data", own_body)])
+          is False,
+          "of any other type it is searched  <-- pinned defect")
+    check(is_own_graph(dict(own_meta, tags=["whobreaks-" + TARGET]),
+                       [("data", own_body)]) is False
+          and is_own_graph(dict(own_meta, tags=["whobreaks"]),
+                           [("data", own_body)]) is False
+          and is_own_graph(dict(own_meta, tags="whobreaks"),
+                           [("data", own_body)]) is False,
+          "without the tag, or the tag that names a target, it is searched  "
+          "<-- pinned defect")
+    check(is_own_graph(own_meta, [("data", dict(own_body, target=OTHER))])
+          is False
+          and is_own_graph(own_meta, [("data", dict(own_body,
+                                                    whobreaks_graph=2))])
+          is False
+          and is_own_graph(own_meta, [("data", "text"), ("data", None)])
+          is False,
+          "and unless its file is a graph of the target its own tag names  "
+          "<-- pinned defect")
+    own_item = {"tags": own_tags, "type": PUBLISH_TYPE, "title": "g"}
+    own_run = inspect(OTHER, {"g" * 32: own_item},
+                      lambda iid, size: ([("data", own_body)], None))
+    read_run = inspect(OTHER, {"g" * 32: own_item},
+                       lambda iid, size: ([("data", own_body)], "403"))
+    check(own_run.own == ["g" * 32] and own_run.scanned == 0
+          and read_run.own == [] and read_run.scanned == 1
+          and [one["id"] for one in read_run.unread] == ["g" * 32],
+          "a graph is left out of a sweep only when it was read without a "
+          "problem, so one that could not be read is unread, not exempt  "
+          "<-- pinned defect")
 
     # ---- the document, without a portal
     doc = build_document(PORTAL, "orgid:ORG", TARGET, "2026-09-16T00:00:00Z",
@@ -5797,19 +6038,26 @@ def _dashboard_problem(args, graphs):
     return None
 
 
-def sweep_caveats(args, token, target, items):
+def sweep_caveats(args, token, target, items, role=None):
     """The reasons an empty result of this sweep is not an all clear.
 
     A person who deletes on exit 0 has to be able to rely on it. So exit 0
-    means: signed in, the whole organization, and the target itself among the
-    items searched. The last one catches a query or a credential that cannot
-    see where the target lives, which sweeps zero items and still finds none.
+    means: signed in as an administrator, the whole organization, and the
+    target itself among the items searched. The last one catches a query or a
+    credential that cannot see where the target lives, which sweeps zero
+    items and still finds none. A publisher or a member cannot search another
+    user's private items, and that sweep looks exactly like a clean one.
     """
     reasons = []
     if not token:
         reasons.append("no token was sent, so only public items were "
                        "searched and a private item that uses the target was "
                        "not seen")
+    elif role != "org_admin":
+        reasons.append("the token's user is not known to be an administrator "
+                       "(role: %s), so another user's private item that uses "
+                       "the target may not have been seen"
+                       % (scrub(role)[:40] if role else "not reported"))
     if args.query:
         reasons.append("--query limited the search to the items it matches, "
                        "not to the whole organization")
@@ -5943,6 +6191,7 @@ def _run(args):
 
     try:
         token = _authenticate(args)
+        role = portal_role(args.url, token, args.insecure) if token else None
         query = args.query
         if not query:
             oid = org_id(args.url, token, args.insecure)
@@ -5978,7 +6227,8 @@ def _run(args):
                          portal_reader(args.url, token, args.insecure),
                          echo=say,
                          unproven=unproven + extra, url=needle,
-                         caveats=sweep_caveats(args, token, target, items))
+                         caveats=sweep_caveats(args, token, target, items,
+                                               role))
     except (RuntimeError, ValueError) as exc:
         # ValueError is how the enumeration rejects a page it cannot trust: a
         # result with no id, a nextStart that does not advance. Those come from
@@ -6085,7 +6335,7 @@ def compare_files(old_path, new_path, dashboard=None, apply=False, depth=1):
         except OSError as exc:
             complain(scrub(exc))
             return 2
-    if not (old.get("complete") and new.get("complete")) or unknown:
+    if not (graph_trusted(old) and graph_trusted(new)) or unknown:
         return 2
     return 1 if (added or removed) else 0
 
