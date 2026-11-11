@@ -92,6 +92,8 @@ PASS  and the token sitting beside the id in that very url is redacted out of th
 ...
 PASS  access_token is a token too, although an underscore is a word character and \b never matched after it  <-- pinned defect
 ...
+PASS  a secret written as passphrase=S3CR3T is redacted, because a key with a capital after a lower case letter is still a key  <-- pinned defect
+...
 PASS  a secret written as "token": "S3CR3T" is redacted too, not only one written as key=value  <-- pinned defect
 ...
 PASS  a token whose key sits further before the id than the excerpt reaches is still redacted, because the text is scrubbed before it is cut  <-- pinned defect
@@ -279,10 +281,10 @@ PASS  a prefix of --dashboard is refused, because it names a file the run will w
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-828 assertions, 0 failed
+833 assertions, 0 failed
 ```
 
-The full run prints all 828 assertions. It printed the same 828 lines on Windows under
+The full run prints all 833 assertions. It printed the same 833 lines on Windows under
 Python 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this
 block is cut.
 
@@ -308,7 +310,7 @@ needs a portal that the stand-in cannot play.
 
 Python 3.9 or newer. Standard library only: `urllib`, `json`, `csv`, `re`, `ssl`, `os`, `io`,
 `argparse`, `datetime`, `getpass`, `html`, `time`, and `http.server`, `threading`, `socket`, `tempfile`,
-`shutil`, `email` and `importlib` inside the self-test. It runs on ArcGIS Pro's Python and on a plain `python3`.
+`shutil`, `email` and `importlib` inside the self-test. It ran on a cloned ArcGIS Pro conda environment (Python 3.13.7) and on a plain `python3`. The default `arcgispro-py3` environment was not run.
 `arcpy` is not used and the `arcgis` package is not needed.
 
 ```
@@ -858,7 +860,7 @@ every column but `count`, which stays a number. OWASP lists these six, a line fe
 full-width forms. It lists three techniques, which are double quotes around each field, a single
 quote before each field and doubled inner double quotes, and it adds that they "are not reliable in
 Microsoft Excel after saving and re-opening the CSV file". For Excel it describes a tab prefix
-instead: https://owasp.org/www-community/attacks/CSV_Injection. This tool follows the
+instead: https://community.owasp.org/attacks/CSV_Injection. This tool follows the
 apostrophe form, as `xwddiff` does. Microsoft documents that an apostrophe
 typed before an entry makes Excel store it as text:
 https://support.microsoft.com/en-us/office/keeping-leading-zeros-and-large-numbers-1bf7b935-36e1-4985-842f-5dfa51f85fe7.
@@ -1039,7 +1041,7 @@ and `taken`. The self-test asserts that no credential reaches this file either.
 - The scrubber reads a percent-encoded key and separator such as `%3Ftoken%3D`, but a url that is
   encoded twice, as in `%253D`, is not recognised.
 - Only a value after a key name the scrubber knows is replaced, apart from the bare shapes named
-  under "Output". `auth=`, `appid=`, `pass=`, `code=`, `AccessKeyId=`, `credentials:`,
+  under "Output". `auth=`, `appid=`, `pass=`, `code=`, `AccessKeyId=`,
   `sessionid=`, a cookie value such as `esri_auth=...` and `token VALUE` with only a space, next to
   the target id, are printed and written as they are. A `key` is replaced only as a query
   parameter, `?key=VALUE`, and `auth` is left out on purpose, because `"key"` is an ordinary JSON
@@ -1094,9 +1096,27 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   as an unexpected error, exit 2, and not as a wrong verdict.
 - A CSV given to `--compare` is refused with exit 64, but the message is the raw JSON error
   `Expecting value: line 1 column 1 (char 0)` and does not say to pass a graph file.
-- The sweep sends the token in the query string of every GET, as documented. Esri documents an
-  `X-Esri-Authorization` header as an alternative that keeps the token out of server and proxy
-  access logs; this tool does not use it, and that was not checked against Esri's documentation.
+- The sweep sends the token in the query string of every GET. A header form, `X-Esri-Authorization`,
+  exists as an alternative, but this tool does not use it, and it was not checked against Esri's
+  documentation.
+- The `owner` and `type` columns are written as the portal gave them and are not passed through the
+  scrubber. A portal user name and an item type are not expected to hold a secret.
+- `cell()` guards only `str` values. A non-string `owner` in a hand-built document is written as it
+  is. A portal gives strings there.
+- The scrubber does not recognise `pw=`, `sas=`, `bearer=`, `secretAccessKey=`, `sessionKey=`,
+  `userpass=`, or a phrase such as `password is VALUE`. A key name with a prefix, such as
+  `myaccesstoken=`, is not scrubbed either. These print as written next to the target id.
+- A secret that holds a space and is not quoted is replaced only up to the space, and
+  `Bearer%20VALUE` in a url is replaced only up to the `%20`.
+- Bare tokens with no key name in front of them, such as GitLab `glpat-`, Slack `xoxb-` or `sk-`
+  keys, are not recognised. Only the bare shapes named under "Output" are.
+- A token or password that `urlencode` would change is removed from a portal error only when the
+  portal echoes it unencoded.
+- `--insecure` is accepted with `--token`, so the token then goes down a connection whose
+  certificate is not checked. Only `--username` is refused with it.
+- A `whobreaks.py` checked out on Windows with `autocrlf` has CRLF line endings, so `./whobreaks.py`
+  fails on Linux through the shebang. Run `python3 whobreaks.py`. The repository stores LF.
+- `--self-test` takes about 40 seconds, because it starts a loopback server and makes many HTTP calls.
 - The description of `f1729/whobreaks` in "Related" was checked against that repository's GitHub
   description only, not against its code.
 

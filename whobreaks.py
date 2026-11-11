@@ -238,11 +238,11 @@ URL_RIGHT = ALNUM | frozenset("-_")
 # it is replaced and not the scheme word alone. A key and value written inside
 # a backslash-escaped string, {\"token\": \"VALUE\"} in a notebook cell, are
 # read too: a backslash may sit before each quote.
-SECRET_KEYS = (r"token|password|passwd|pwd|apikey|api[-_]?key|code_verifier|"
+SECRET_KEYS = (r"token|password|passwd|passphrase|credentials?|pwd|apikey|api[-_]?key|code_verifier|"
                r"signature|secret|sig|authorization|"
                r"(?:secret|access|account|private|auth)[-_]?key|"
                r"(?:access|refresh|auth|session)[-_]?token")
-SECRET_CAMEL = (r"Token|Password|Passwd|Pwd|ApiKey|Api[-_]?Key|Signature|"
+SECRET_CAMEL = (r"Token|Password|Passwd|Passphrase|Credentials?|Pwd|ApiKey|Api[-_]?Key|Signature|"
                 r"Secret|Sig|Authorization")
 # A bare "key" is a credential only as a query parameter, ?key=VALUE, which is
 # how Google and many map-tile hosts take an API key. In a JSON body "key" is
@@ -2162,7 +2162,7 @@ FORMULA_LEADERS = ("=", "+", "-", "@", "\t", "\r")
 
 
 def cell(value):
-    """A CSV cell that a spreadsheet will not run as a formula.
+    """A CSV cell with a guard against spreadsheet formula injection.
 
     A title, an owner, a source, a path and an excerpt all come from the
     portal, and an item owner writes the first three. Text that starts with a
@@ -2753,7 +2753,9 @@ def self_test():
                   "authToken: S3CR3T", "?sessionToken=S3CR3T&f=json",
                   "oauthToken='S3CR3T'", "refreshToken=S3CR3T",
                   "apiKey=S3CR3T", "api-key=S3CR3T", "pwd=S3CR3T",
-                  "passwd=S3CR3T", "Authorization: Bearer S3CR3T",
+                  "passwd=S3CR3T", "passphrase=S3CR3T", "credential: S3CR3T",
+                  "credentials=S3CR3T", "dbPassphrase=S3CR3T",
+                  "userCredential=S3CR3T", "Authorization: Bearer S3CR3T",
                   "Authorization: Basic S3CR3T", "https://svc:S3CR3T@host/x",
                   "a header copied into a note: Bearer S3CR3TVALUE"):
         check("S3CR3T" not in scrub(camel),
