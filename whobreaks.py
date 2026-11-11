@@ -255,6 +255,12 @@ SECRET_RE = re.compile(
 URL_SECRET_RE = re.compile(r"(?i)(://[^/\s:@]+:)([^/\s@]+)(@)")
 BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{8,})")
 
+# An Esri API key is a bare string with no key name in front of it. The prefix
+# AAPK is the one arcgis-rest-js tests for, and AAPT is the one Esri's access
+# token reference shows. Neither can follow a letter or digit, so a longer word
+# that merely contains them is left alone.
+APIKEY_RE = re.compile(r"(?<![A-Za-z0-9])AAP[KT][A-Za-z0-9_.~-]{16,}")
+
 # Characters that move a terminal's cursor or change what it shows. An item
 # title is typed by whoever owns the item, and one holding ESC [2K and a
 # carriage return rewrote the report line above it on the operator's screen.
@@ -301,6 +307,7 @@ _SCRUB_PASSES = (
     (SECRET_RE, lambda m: m.group(1) + m.group(2) + REDACTED),
     (URL_SECRET_RE, lambda m: m.group(1) + REDACTED + m.group(3)),
     (BEARER_RE, lambda m: m.group(1) + REDACTED),
+    (APIKEY_RE, lambda m: REDACTED),
 )
 
 
@@ -1033,6 +1040,7 @@ def inspect(target, items, reader, echo=None, unproven=(), url=None,
     scanned = 0
     for iid in sorted(items):
         meta = items[iid] or {}
+        title = scrub(meta.get("title") or "")
         if iid == target:
             # The target references itself everywhere. Skipping it here rather
             # than filtering it out of the report keeps it out of the item
@@ -1052,10 +1060,10 @@ def inspect(target, items, reader, echo=None, unproven=(), url=None,
             continue
         scanned += 1
         if problem:
-            unread.append({"id": iid, "title": meta.get("title") or "",
+            unread.append({"id": iid, "title": title,
                            "problem": scrub(problem)})
         hits = scan_item(target, meta, payloads, url)
-        names[iid] = {"title": meta.get("title") or "",
+        names[iid] = {"title": title,
                       "type": meta.get("type") or ""}
         if hits:
             edges.append({"from": iid, "to": target, "kind": worst_kind(hits)})
@@ -1064,13 +1072,13 @@ def inspect(target, items, reader, echo=None, unproven=(), url=None,
             edges.append({"from": iid, "to": other, "kind": kind})
         for hit in hits:
             row = dict(hit)
-            row.update({"id": iid, "title": meta.get("title") or "",
+            row.update({"id": iid, "title": title,
                         "type": meta.get("type") or "",
                         "owner": meta.get("owner") or ""})
             findings.append(row)
         if echo and hits:
             echo("  %s %s (%s)" % (LABEL[worst_kind(hits)], iid,
-                                   meta.get("title") or "untitled"))
+                                   title or "untitled"))
     findings.sort(key=lambda hit: (-RANK[hit["kind"]], hit["id"],
                                    hit["source"], hit["path"]))
     edges = [edge for edge in edges if edge["to"] not in own]
@@ -1889,7 +1897,7 @@ def portal_reader(url, token, insecure=False, max_size=MAX_ITEM_SIZE,
             return
         problem = portal_error(body)
         if problem:
-            problems.append("%s: %s" % (source, problem))
+            problems.append("%s: %s" % (source, redact(problem, token)))
         elif body is not None:
             payloads.append((source, body))
 
@@ -2655,6 +2663,19 @@ def self_test():
           "<-- pinned defect")
     check("CLIENTSECRET" not in scrub("client_secret = 'CLIENTSECRET'"),
           "and so is a client_secret in a notebook  <-- pinned defect")
+    for esri_key in ("AAPK" + "Q" * 40, "AAPT" + "q" * 20 + ".." + "r" * 9):
+        check(esri_key not in scrub("config: %s %s" % (esri_key, TARGET))
+              and TARGET in scrub("config: %s %s" % (esri_key, TARGET)),
+              "an Esri API key with no key name in front of it is redacted "
+              "and the id beside it is kept  <-- pinned defect")
+    check(scrub("XAAPK" + "Q" * 40) == "XAAPK" + "Q" * 40
+          and scrub("AAPK" + "Q" * 5) == "AAPK" + "Q" * 5,
+          "a word that merely contains AAPK, or a prefix too short to be a "
+          "key, is left alone")
+    check("Q" * 20 not in excerpt("x " * 30 + "AAPK" + "Q" * 40 + " " + TARGET,
+                                  len("x " * 30 + "AAPK" + "Q" * 41)),
+          "an excerpt cut through the middle of an API key does not print "
+          "its body  <-- pinned defect")
     check(scrub("mytoken=abc") == "mytoken=abc",
           "and a key that merely ends in token after a letter is left alone")
     for camel in ("accessToken=S3CR3T", '{"clientSecret": "S3CR3T"}',
@@ -3751,6 +3772,7 @@ def self_test():
     TEXT_ID = "7e" + "0" * 30
     DESC_ID = "dc" + "0" * 30
     BIG_ID = "b1" + "0" * 30
+    ECHO_ID = "ec" + "0" * 30
     # Never in the catalogue: these two exist so that the per item failure
     # paths are driven over a real socket rather than described.
     PRIV_ID = "9d" + "0" * 30
@@ -3817,6 +3839,9 @@ def self_test():
         CLONE_ID: CLONE,
         TEXT_ID: PYTEXT,
         # Deeper than json.loads can recurse on any python this runs on.
+        # A proxy that answers 498 and repeats the caller's token bare.
+        ECHO_ID: {"error": {"code": 498, "message":
+                            "Invalid token %s for user" % LIVE_TOKEN}},
         DEEP_ID: "[" * 100000 + '"%s"' % TARGET + "]" * 100000,
         W_APP: {"values": {"webmap": W_MAP}},
         W_SITE: {"widgets": [{"type": "app", "itemId": W_APP}]},
@@ -4229,6 +4254,12 @@ def self_test():
         check(payloads == [] and "500" in problem,
               "an item whose /data fails over HTTP returns a problem, not an "
               "exception that would end the sweep  <-- pinned defect")
+        payloads, problem = read(ECHO_ID, 20)
+        check(payloads == [] and "498" in problem
+              and LIVE_TOKEN not in problem,
+              "a portal error body that repeats the caller's token with no "
+              "key name in front of it comes back with the token redacted  "
+              "<-- pinned defect")
         payloads, problem = read(BIG_ID, MAX_ITEM_SIZE + 1)
         check(payloads == [] and "never searched" in problem,
               "an item too large to fetch is a problem too, so it is unread "
@@ -4522,6 +4553,32 @@ def self_test():
               "a title, an owner and an excerpt from a swept item reach the "
               "csv guarded, from the sweep through build_document  <-- "
               "pinned defect")
+        sitem = "m" * 32
+        sleak = inspect(TARGET, {sitem: {"title": "Sites password=S3CR3T",
+                                         "type": "Web Map", "owner": "o"}},
+                        lambda iid, size: ([("data", {"operationalLayers": [
+                            {"itemId": TARGET},
+                            {"note": "AAPK" + "Q" * 40 + " " + TARGET}]})],
+                            None))
+        sdoc = build_document(PORTAL, "q", TARGET, "t", sleak)
+        sjson = write_json(sdoc, os.path.join(workdir, "leak.json"))
+        scsv = write_csv(sdoc, os.path.join(workdir, "leak.csv"))
+        with io.open(sjson, encoding="utf-8") as handle:
+            stext = handle.read()
+        with io.open(scsv, encoding="utf-8") as handle:
+            stext += handle.read()
+        stext += " ".join(describe(sleak))
+        check("S3CR3T" not in stext and "Sites password=" in stext,
+              "a credential in an item title reaches neither the console, "
+              "the json report nor the csv, and the rest of the title "
+              "survives  <-- pinned defect")
+        check("QQQQQQQQQQ" not in stext,
+              "an Esri API key beside the target id reaches neither the "
+              "console, the json report nor the csv  <-- pinned defect")
+        sunread = inspect(TARGET, {sitem: {"title": "t token=S3CR3T"}},
+                          lambda iid, size: ([], "403"))
+        check("S3CR3T" not in json.dumps(sunread.unread),
+              "and an unread item's title is scrubbed too  <-- pinned defect")
         check(cell(7) == 7 and cell(-7) == -7 and cell(None) is None,
               "a number or a missing value passes through unguarded")
         gjson = write_json({"findings": [dict(gbase, title="=raw")]},

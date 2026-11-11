@@ -105,7 +105,6 @@ PASS  the fold joins two findings only when the file, the path AND the class all
 PASS  an app whose url names it in the QUERY STRING is left to the id search, because without that query it is every app of the same template in the org  <-- pinned defect
 ...
 PASS  a url that is a bare server is refused as a needle, because it would match every service on that server  <-- pinned defect
-...
 PASS  https://maps.example.org/arcgis is refused the same way, because a web adaptor or a rest/services root matches every service under it  <-- pinned defect
 ...
 PASS  a viewer url whose query string opens ANOTHER item is refused, because without that query it is every link through that viewer  <-- pinned defect
@@ -141,7 +140,6 @@ PASS  transitive mode inherits the unread limit at EVERY hop: an unread item cou
 PASS  an edge whose item could not be READ this time is unknown, not removed, because a 403 is not a fix  <-- pinned defect
 ...
 PASS  an edge of an item the NEW sweep could not read is unknown even when it looks ADDED, because the metadata of an unread item is still searched and yields edges  <-- pinned defect
-...
 PASS  a map that left the sweep takes its own edge with it, and the edges TO it are unknown, not removed, because the items that load it did not change  <-- pinned defect
 ...
 PASS  a page size of 1000 is clamped to 100 before it is sent, because the server clamps it silently  <-- pinned defect
@@ -185,10 +183,12 @@ PASS  an item too large to fetch is a problem too, so it is unread rather than c
 ...
 PASS  a body nested too deep for json.loads is searched as text and its item is unread, not a RecursionError that ended the sweep  <-- pinned defect
 PASS  so the real hard break in another item of the same sweep is still reported, and the run exits 2  <-- pinned defect
+PASS  a body the connection cut short is a problem, because HTTPResponse.read does not raise and the half was searched as if it were the whole  <-- pinned defect
 ...
 PASS  a StoryMap whose sixty photographs fill the first page of its resource listing still has its draft read, because the listing is paged to its end  <-- pinned defect
 ...
 PASS  an item with more JSON resources than the limit reads that many and is UNREAD, not clean, because the rest were never searched  <-- pinned defect
+...
 PASS  a /data body over the byte cap is searched to the cap and the item is UNREAD, because the target id can sit past the cap  <-- pinned defect
 ...
 PASS  a sweep with two unreadable items exits 2, whatever it found  <-- pinned defect
@@ -199,21 +199,17 @@ PASS  the token never reaches stdout  <-- pinned defect
 ...
 PASS  a complete sweep that found a reference exits 1  <-- pinned defect
 ...
-PASS  an organization in which nothing references the target exits 0
-...
 PASS  no credential reaches the file on disk  <-- pinned defect
-...
-PASS  a body the connection cut short is a problem, because HTTPResponse.read does not raise and the half was searched as if it were the whole  <-- pinned defect
-...
-PASS  a token whose user is not an administrator cannot search another user's private items, so a clean sweep is exit 2  <-- pinned defect
-PASS  and the graph file carries the caveat next to complete  <-- pinned defect
-PASS  and the page does not show the green banner, nor claim that nothing loads the target  <-- pinned defect
 PASS  and the json comes out with its keys in order, so two runs a week apart diff to the findings that changed  <-- pinned defect
 ...
 PASS  with no blank line between rows: the defect DOUBLES the carriage return, it does not add a whole empty line, so that is the sequence asserted on  <-- pinned defect
 ...
-PASS  --username with a plain http:// portal url is refused before any request, because the password would travel in clear  <-- pinned defect
+PASS  a title, an owner and an excerpt from a swept item reach the csv guarded, from the sweep through build_document  <-- pinned defect
+PASS  a credential in an item title reaches neither the console, the json report nor the csv, and the rest of the title survives  <-- pinned defect
+PASS  an Esri API key beside the target id reaches neither the console, the json report nor the csv  <-- pinned defect
+PASS  and an unread item's title is scrubbed too  <-- pinned defect
 ...
+PASS  --username with a plain http:// portal url is refused before any request, because the password would travel in clear  <-- pinned defect
 PASS  the token can come from WHOBREAKS_TOKEN, so a scheduled run keeps it off argv, and it is sent on every call  <-- pinned defect
 ...
 PASS  the web map that loads the target only by its SERVICE URL is a hard break, over the wire  <-- pinned defect
@@ -253,15 +249,24 @@ PASS  a write that fails at the rename leaves the old page and no partial file  
 PASS  a title the console cannot encode is printed with a ? for each character, and the sweep still exits 1, because UnicodeEncodeError is a ValueError and used to make it exit 2  <-- pinned defect
 ...
 PASS  and an independent reader gets every value and the file bytes back, including a carriage return and a near boundary inside the file
+...
 PASS  another user's item is refused as a place to put the graph  <-- pinned defect
+...
 PASS  --publish without --apply sends no POST and adds no item  <-- pinned defect
+...
 PASS  no request shares the item: this tool never shares it  <-- pinned defect
 PASS  no credential reaches the console, the item's file, its title or its description  <-- pinned defect
+...
 PASS  a portal that answers corrupt is a failure, not a published graph  <-- pinned defect
 ...
-PASS  a title, an owner and an excerpt from a swept item reach the csv guarded, from the sweep through build_document  <-- pinned defect
-...
 PASS  a user name with a # and an @ is quoted into the path, or the # ends the url there  <-- pinned defect
+...
+PASS  an organization in which nothing references the target exits 0
+...
+PASS  a token whose user is not an administrator cannot search another user's private items, so a clean sweep is exit 2  <-- pinned defect
+PASS  and the graph file carries the caveat next to complete  <-- pinned defect
+PASS  and the page does not show the green banner, nor claim that nothing loads the target  <-- pinned defect
+...
 PASS  a unique prefix of --publish is refused, because it names a write to the organization  <-- pinned defect
 ...
 PASS  a title, a type, a target and a url that hold markup are escaped, so an item owner cannot put script on the page  <-- pinned defect
@@ -269,20 +274,22 @@ PASS  a title, a type, a target and a url that hold markup are escaped, so an it
 PASS  a diff on the page marks an edge of an unread item unknown, and says why  <-- pinned defect
 ...
 PASS  a unique prefix of --apply is refused, because abbreviations would turn a typo into a write  <-- pinned defect
+...
 PASS  a prefix of --dashboard is refused, because it names a file the run will write  <-- pinned defect
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-789 assertions, 0 failed
+797 assertions, 0 failed
 ```
 
-The full run prints all 789 assertions. It printed the same 789 lines on Windows under
+The full run prints all 797 assertions. It printed the same 797 lines on Windows under
 Python 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this
 block is cut.
 
-On Linux about one self-test run in ten fails or ends in a traceback because a loopback stand-in
-connection does not complete; a rerun is green, and the failure is in the stand-in, not the
-sweep. `faulthandler` showed the client stuck in `socket.create_connection` with the stand-in
+On Linux an earlier version of this self-test sometimes failed or ended in a traceback because a
+loopback stand-in connection did not complete; a rerun was green, and the failure was in the
+stand-in, not the sweep. Nine runs in a row of the current file were green, so how often it
+happens now is not known. `faulthandler` showed the client stuck in `socket.create_connection` with the stand-in
 idle, and a failed run ends with failed assertions or a traceback in a stand-in section,
 never a wrong answer. The cause was not found. It was never seen on Windows.
 
@@ -855,7 +862,11 @@ token in its query string, and that excerpt is the most useful line in the repor
 written with the token replaced rather than dropped. The text is scrubbed before the excerpt is
 cut from it, so a token whose key is outside the excerpt is still replaced. `access_token=` is
 replaced as well as `token=`, and so are `client_secret=`, `secret=` and an Azure `sig=`, and so is a value written as `token="..."`, `password = '...'` or
-`"token": "..."`. The self-test asserts that no credential reaches stdout or either file.
+`"token": "..."`. An Esri API key written bare, with no key name in front of it, is replaced when
+it starts `AAPK` or `AAPT`: arcgis-rest-js tests for the `AAPK` prefix, and Esri's access token
+reference shows an `AAPT` example. An item title is scrubbed too, and so is the problem text of an
+item that could not be read, with the caller's own token removed from it even when no key name
+sits in front. The self-test asserts that no credential reaches stdout or either file.
 
 The console replaces every control character in a line with `?`. That includes the title, the
 excerpt and an error message that quotes the portal. An item owner can put `ESC [2K` and a
@@ -901,7 +912,7 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   on Windows stops before 1,500 levels, 3.12 and 3.13 on Windows parse 1,500 and stop before
   5,000, and 3.12 on Linux parses 5,000. An item between those depths is unread on one host and
   read on another. The self-test uses 100,000 levels, which no host parses.
-- Only a secret that follows a key name this tool knows is scrubbed: `token`, `password`,
+- Apart from an Esri API key that starts `AAPK` or `AAPT`, only a secret that follows a key name this tool knows is scrubbed: `token`, `password`,
   `apikey`, `api_key`, `code_verifier`, `signature`, `secret` and `sig`, with any prefix such as
   `access_`. A password passed as a bare positional argument, as in `GIS(url, "admin", "...")`,
   is not recognised and is printed in the excerpt.
@@ -1000,11 +1011,18 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   them.
 - The scrubber reads a percent-encoded key and separator such as `%3Ftoken%3D`, but a url that is
   encoded twice, as in `%253D`, is not recognised.
-- Only a value after a key name the scrubber knows is replaced. A bare `key=VALUE`, an Esri API
-  key that starts `AAPK`, `credentials:` and `sessionid=` values next to the target id are printed
-  and written as they are.
-- Item titles are not scrubbed, so a title that holds a credential-shaped string such as
-  `access_token=...` is printed and written as it is.
+- Only a value after a key name the scrubber knows is replaced, apart from an Esri API key that
+  starts `AAPK` or `AAPT`. A bare `key=VALUE`, and `credentials:` and `sessionid=` values next to
+  the target id, are printed and written as they are. That holds for an item title too.
+- A CSV report holds findings only. Read the exit code and the console for unread items, caveats
+  and transitive rows, which only the JSON report carries. A person who opens an empty CSV after an
+  incomplete sweep (exit 2) sees no gap.
+- `argparse` echoes the value of an argument it does not recognise, so `--tokn SECRET` prints
+  `unrecognized arguments: --tokn SECRET` to stderr with exit 64. Use `WHOBREAKS_TOKEN` for
+  scheduled runs, and check the flag spelling before you type a secret on the command line.
+- `--out` and `--graph` are not checked against the graph files that `--compare` reads, only
+  `--dashboard` is. `--out week1.json --compare week1.json --apply` replaces the earlier graph with
+  a report, so never name a `--compare` file as `--out`.
 - `--username` sends the password to `generateToken` before the `--apply` check. That call signs
   in and writes nothing to the organization, but it is a POST.
 - `--token` with an `http://` url on a host that is not loopback sends the token in the query
