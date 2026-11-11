@@ -254,6 +254,9 @@ PASS  --publish without --apply sends no POST and adds no item  <-- pinned defec
 PASS  no request shares the item: this tool never shares it  <-- pinned defect
 PASS  no credential reaches the console, the item's file, its title or its description  <-- pinned defect
 PASS  a portal that answers corrupt is a failure, not a published graph  <-- pinned defect
+...
+PASS  a title, an owner and an excerpt from a swept item reach the csv guarded, from the sweep through build_document  <-- pinned defect
+...
 PASS  a user name with a # and an @ is quoted into the path, or the # ends the url there  <-- pinned defect
 PASS  a unique prefix of --publish is refused, because it names a write to the organization  <-- pinned defect
 ...
@@ -266,10 +269,10 @@ PASS  a prefix of --dashboard is refused, because it names a file the run will w
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-730 assertions, 0 failed
+783 assertions, 0 failed
 ```
 
-The full run prints all 730 assertions. It printed the same 730 lines on Windows under
+The full run prints all 783 assertions. It printed the same 783 lines on Windows under
 Python 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this
 block is cut.
 
@@ -830,6 +833,19 @@ incomplete into one document, because those three have to be read together. `--f
 writes the nine finding columns: `id`, `title`, `type`, `owner`, `kind`, `source`, `path`,
 `count`, `excerpt`.
 
+A spreadsheet runs a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return as a
+formula, and an item owner writes the title and the text an excerpt is cut from. `--format csv`
+puts one apostrophe in front of any text cell that starts with one of those six characters, in
+every column but `count`, which stays a number. OWASP lists the same characters and names the
+single-quote prefix as the mitigation:
+https://owasp.org/www-community/attacks/CSV_Injection. Microsoft documents that an apostrophe
+typed before an entry makes Excel store it as text:
+https://support.microsoft.com/en-us/office/keeping-leading-zeros-and-large-numbers-1bf7b935-36e1-4985-842f-5dfa51f85fe7.
+The JSON report keeps the text as the portal holds it. The tool never reads a CSV back:
+`--compare` takes graph files only, and the self-test asserts that a CSV given to it is refused
+with exit 64. A program that reads the CSV must strip the one leading apostrophe itself. A title
+that began with an apostrophe in the portal cannot then be told from a guarded one.
+
 Excerpts are scrubbed on the way out. A secured feature service url inside a web map carries a
 token in its query string, and that excerpt is the most useful line in the report, so it is
 written with the token replaced rather than dropped. The text is scrubbed before the excerpt is
@@ -840,7 +856,7 @@ replaced as well as `token=`, and so are `client_secret=`, `secret=` and an Azur
 The console replaces every control character in a line with `?`. That includes the title, the
 excerpt and an error message that quotes the portal. An item owner can put `ESC [2K` and a
 carriage return in a title, and on the console that rewrote the report line above it. The JSON
-and CSV files keep the title as the portal holds it.
+and the JSON file keeps the title as the portal holds it. The CSV file guards it as above.
 
 With `--depth` above 1, the JSON report also carries `depth`, `beyond` and a `transitive` list.
 Each row has the item's `id`, `title` and `type`, its `hop`, the first-hop item as `via`, and
@@ -957,8 +973,10 @@ and `taken`. The self-test asserts that no credential reaches this file either.
 - `diff_graphs` checks that the item an edge names was in both sweeps, but not that the item
   holding the reference was. An app that drops out of the sweep without being deleted, because the
   sweeping account lost sight of it, prints as a removed reference.
-- `--format csv` does not neutralise a leading `=`, `+`, `-` or `@` in a title or an excerpt, so a
-  spreadsheet may evaluate an item owner's text as a formula. Open the file as text, or use json.
+- The CSV guard covers the six characters above and nothing else. OWASP also lists a line feed
+  and the full-width `=`, `+`, `-` and `@` as leading characters. The guard does not prefix those.
+  Whether Excel shows the apostrophe after it opens a CSV was not tested; no spreadsheet runs
+  in the self-test. The self-test checks the bytes of the file with the `csv` module.
 - `--apply` with a two-file `--compare` and no `--dashboard` is accepted and writes nothing, with
   no message.
 - `--out`, `--graph` and `--dashboard` are compared without regard to case on every host. On Linux

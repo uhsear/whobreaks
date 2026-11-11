@@ -2069,19 +2069,38 @@ def write_json(document, path):
     return path
 
 
+# A spreadsheet reads a cell that starts with one of these as a formula.
+FORMULA_LEADERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def cell(value):
+    """A CSV cell that a spreadsheet will not run as a formula.
+
+    A title, an owner, a source, a path and an excerpt all come from the
+    portal, and an item owner writes the first three. Text that starts with a
+    formula character gets one apostrophe in front. A number is returned as it
+    is, so the count column stays numeric. The tool never reads this CSV back
+    (--compare reads graph files only), so there is no strip on read.
+    """
+    if isinstance(value, str) and value[:1] in FORMULA_LEADERS:
+        return "'" + value
+    return value
+
+
 def write_csv(document, path):
     """Write the findings as CSV and return the path.
 
     newline="" is not decoration. Without it the csv module's own carriage
     return meets the one the text layer adds on Windows, and every other line
     of the file is blank, which Excel reads as an empty row between findings.
+    Every text cell goes through cell(); the JSON report keeps the raw text.
     """
     _make_parent(path)
     with io.open(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(CSV_FIELDS)
         for row in document["findings"]:
-            writer.writerow([row[field] for field in CSV_FIELDS])
+            writer.writerow([cell(row[field]) for field in CSV_FIELDS])
     return path
 
 
@@ -4372,6 +4391,58 @@ def self_test():
         check(len(list(csv.reader(io.StringIO(csv_text)))) == 2,
               "and one row per finding")
         check(LIVE_TOKEN not in csv_text, "and no credential in it either")
+
+        # formula injection: text from the portal that a spreadsheet would run
+        gbase = {"id": "a" * 32, "title": "t", "type": "Web Map",
+                 "owner": "o", "kind": HARD, "source": "data", "path": "p",
+                 "count": 1, "excerpt": "e"}
+        guarded = os.path.join(workdir, "guard.csv")
+        for gfield in ("id", "title", "type", "owner", "kind", "source",
+                       "path", "excerpt"):
+            for glead in ("=", "+", "-", "@", chr(9), chr(13)):
+                grow = dict(gbase)
+                grow[gfield] = glead + "SUM(A1)"
+                write_csv({"findings": [grow]}, guarded)
+                with io.open(guarded, encoding="utf-8", newline="") as handle:
+                    ggot = list(csv.reader(handle))[1]
+                want = "'" + glead + "SUM(A1)"
+                check(ggot[CSV_FIELDS.index(gfield)] == want
+                      and ggot[CSV_FIELDS.index("count")] == "1",
+                      "a %s starting with %r gets one apostrophe and the "
+                      "count stays a number  <-- pinned defect"
+                      % (gfield, glead))
+        write_csv({"findings": [dict(gbase, title="'=kept", owner="a=b",
+                                     excerpt="", path="-")]}, guarded)
+        with io.open(guarded, encoding="utf-8", newline="") as handle:
+            ggot = list(csv.reader(handle))[1]
+        check(ggot[1] == "'=kept" and ggot[3] == "a=b" and ggot[8] == ""
+              and ggot[6] == "'-",
+              "an apostrophe lead, a formula character inside the text and "
+              "an empty cell are not changed again; a lone minus is guarded")
+        ghit = inspect(TARGET, {"m" * 32: {"title": "=HYPERLINK(1)",
+                                           "type": "Web Map",
+                                           "owner": "+owner"}},
+                       lambda iid, size: ([("data", {"operationalLayers": [
+                           {"itemId": "=1+1;" + TARGET}]})], None))
+        write_csv(build_document(PORTAL, "q", TARGET, "t", ghit), guarded)
+        with io.open(guarded, encoding="utf-8", newline="") as handle:
+            ggot = list(csv.reader(handle))[1]
+        check(ggot[1] == "'=HYPERLINK(1)" and ggot[3] == "'+owner"
+              and ggot[8] == "'=1+1;" + TARGET and ggot[7] == "1",
+              "a title, an owner and an excerpt from a swept item reach the "
+              "csv guarded, from the sweep through build_document  <-- "
+              "pinned defect")
+        check(cell(7) == 7 and cell(-7) == -7 and cell(None) is None,
+              "a number or a missing value passes through unguarded")
+        gjson = write_json({"findings": [dict(gbase, title="=raw")]},
+                               os.path.join(workdir, "raw.json"))
+        with io.open(gjson, encoding="utf-8") as handle:
+            check(json.load(handle)["findings"][0]["title"] == "=raw",
+                  "the json report keeps the text as the portal holds it")
+        code, seen = captured(lambda: main(
+            ["--compare", guarded, guarded]))
+        check(code == 64, "a csv report is not a graph file: the tool never "
+              "reads its own csv back")
 
         # usage errors, which never reach the portal
         code, seen = captured(lambda: main([]))
