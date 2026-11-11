@@ -96,6 +96,10 @@ PASS  a secret written as "token": "S3CR3T" is redacted too, not only one writte
 ...
 PASS  a token whose key sits further before the id than the excerpt reaches is still redacted, because the text is scrubbed before it is cut  <-- pinned defect
 ...
+PASS  a token value longer than 1 KB, whose key sits more than 1 KB before the id, is redacted and not printed from its last 44 characters  <-- pinned defect
+...
+PASS  a token behind a percent-encoded key and separator, %3Ftoken%3D, is redacted in the excerpt  <-- pinned defect
+...
 PASS  the fold joins two findings only when the file, the path AND the class all match  <-- pinned defect
 ...
 PASS  an app whose url names it in the QUERY STRING is left to the id search, because without that query it is every app of the same template in the org  <-- pinned defect
@@ -269,18 +273,18 @@ PASS  a prefix of --dashboard is refused, because it names a file the run will w
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-783 assertions, 0 failed
+789 assertions, 0 failed
 ```
 
-The full run prints all 783 assertions. It printed the same 783 lines on Windows under
+The full run prints all 789 assertions. It printed the same 789 lines on Windows under
 Python 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this
 block is cut.
 
-On the Linux host, about one run in thirty failed before this change and still does: a connection
-from the tool to the loopback stand-in did not complete, `faulthandler` showed the client stuck in
-`socket.create_connection` with the stand-in idle, and the run ended with a handful of failed
-assertions, never a wrong answer. The original code showed the same rate, 1 in 25. The cause was
-not found. A rerun was green each time. It was never seen on Windows.
+On Linux about one self-test run in ten fails or ends in a traceback because a loopback stand-in
+connection does not complete; a rerun is green, and the failure is in the stand-in, not the
+sweep. `faulthandler` showed the client stuck in `socket.create_connection` with the stand-in
+idle, and a failed run ends with failed assertions or a traceback in a stand-in section,
+never a wrong answer. The cause was not found. It was never seen on Windows.
 
 Measured with `python -m coverage run --branch whobreaks.py --self-test`, the self-test covers
 100% of the statements and 100% of the branches of the file. No line is excluded, and no line
@@ -836,8 +840,8 @@ writes the nine finding columns: `id`, `title`, `type`, `owner`, `kind`, `source
 A spreadsheet runs a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return as a
 formula, and an item owner writes the title and the text an excerpt is cut from. `--format csv`
 puts one apostrophe in front of any text cell that starts with one of those six characters, in
-every column but `count`, which stays a number. OWASP lists the same characters and names the
-single-quote prefix as the mitigation:
+every column but `count`, which stays a number. OWASP lists these six, a line feed and the full-width forms, and
+names the single-quote prefix as the mitigation:
 https://owasp.org/www-community/attacks/CSV_Injection. Microsoft documents that an apostrophe
 typed before an entry makes Excel store it as text:
 https://support.microsoft.com/en-us/office/keeping-leading-zeros-and-large-numbers-1bf7b935-36e1-4985-842f-5dfa51f85fe7.
@@ -994,8 +998,8 @@ and `taken`. The self-test asserts that no credential reaches this file either.
 - Only resources whose names end in `.json` are read. Text resources such as `readme.txt`,
   `app.js` or `metadata/metadata.xml` are never searched, and the item is not marked unread for
   them.
-- The scrubber does not match a percent-encoded key such as `token%3D`, so an encoded token inside
-  the 1 KB window around the target id can reach an excerpt.
+- The scrubber reads a percent-encoded key and separator such as `%3Ftoken%3D`, but a url that is
+  encoded twice, as in `%253D`, is not recognised.
 - Only a value after a key name the scrubber knows is replaced. A bare `key=VALUE`, an Esri API
   key that starts `AAPK`, `credentials:` and `sessionid=` values next to the target id are printed
   and written as they are.
@@ -1019,6 +1023,28 @@ and `taken`. The self-test asserts that no credential reaches this file either.
 - Esri's Item Data page does not say what `/data` returns for an item with no data file, such as a
   feature service. If a real portal answers those with an error, every such item is unread and
   every sweep exits 2. That is a safe failure, and it was not tried on a real portal.
+- The Microsoft page documents typing an apostrophe in a cell; it does not say what Excel shows for
+  an apostrophe loaded from a CSV, so the guard follows the OWASP recommendation and is not shown
+  to behave the same in Excel.
+- A formula character after leading spaces or invisible characters is not guarded.
+- A UTF-8 CSV with no byte order mark opens in Excel on Windows as ANSI, so non-ASCII titles can
+  show garbled; the JSON report is unaffected.
+- A text value that holds a lone surrogate, such as JSON `"\ud800"` in a title, makes `--format
+  csv` raise `UnicodeEncodeError` partway through the write. The run exits 2 and leaves a truncated
+  CSV. The JSON report is unaffected.
+- When a sweep is incomplete and also found references, the exit code is 2, not 1, so a scheduler
+  that treats 2 as a tool failure does not see that findings exist unless it reads the report.
+- Item data that is a zip-style package, such as a layer package or map package, is decoded as text
+  with replacement characters and counted as read, so an id or url inside its compressed content is
+  not found and the item is not marked unread. Only an oversized body marks it unread.
+- A graph file is trusted to be one this tool wrote: `load_graph` checks the types of `edges`,
+  `caveats`, `unread` and `items` but not `unproven`, so a hand-edited non-string there ends the run
+  as an unexpected error, exit 2, and not as a wrong verdict.
+- A CSV given to `--compare` is refused with exit 64, but the message is the raw JSON error
+  `Expecting value: line 1 column 1 (char 0)` and does not say to pass a graph file.
+- The sweep sends the token in the query string of every GET, as documented. Esri documents an
+  `X-Esri-Authorization` header as an alternative that keeps the token out of server and proxy
+  access logs; this tool does not use it, and that was not checked against Esri's documentation.
 - The description of `f1729/whobreaks` in "Related" was checked against that repository's GitHub
   description only, not against its code.
 

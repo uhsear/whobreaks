@@ -240,10 +240,15 @@ SECRET_KEYS = (r"token|password|passwd|pwd|apikey|api[-_]?key|code_verifier|"
                r"signature|secret|sig|authorization")
 SECRET_CAMEL = (r"Token|Password|Passwd|Pwd|ApiKey|Api[-_]?Key|Signature|"
                 r"Secret|Sig|Authorization")
+# A viewer link carries a secured service url percent-encoded, so the key may
+# follow %3F or %26 and the separator may be %3D or %3A. The value of an
+# encoded url stops at an encoded & or quote, never inside base64's %2B.
 SECRET_RE = re.compile(
-    r"((?<![A-Za-z0-9])(?i:" + SECRET_KEYS + r")|(?<=[a-z0-9])(?:"
-    + SECRET_CAMEL + r"))([\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|"
-    r"(?i:(?:bearer|basic)\s+)?[^&\s\"'<>,;(){}\[\]]+)")
+    r"((?:(?<![A-Za-z0-9])|(?<=%[0-9A-Fa-f]{2}))(?i:" + SECRET_KEYS
+    + r")|(?<=[a-z0-9])(?:" + SECRET_CAMEL + r"))"
+    r"([\"']?\s*(?:[:=]|%3[AaDd])\s*)(\"[^\"]*\"|'[^']*'|"
+    r"(?i:(?:bearer|basic)\s+)?(?:(?!%(?:26|22|27|20|2C|3B|3C|3E))"
+    r"[^&\s\"'<>,;(){}\[\]])+)")
 
 # A password inside a url, scheme://user:password@host, and a Bearer token
 # written without a key in front of it, as in a header copied into a note.
@@ -267,6 +272,57 @@ CSV_FIELDS = ("id", "title", "type", "owner", "kind", "source", "path",
 
 # ----------------------------------------------------------------- the matcher
 
+def scrub_mapped(text):
+    """scrub(), plus the edits it made so a position can follow the text.
+
+    Returns (clean, passes). Each pass is a list of (start, end, new_length)
+    in the coordinates of that pass's input, in order. map_pos() carries a
+    position in the original text through them.
+    """
+    out = "%s" % (text,)
+    passes = []
+    for pattern, build in _SCRUB_PASSES:
+        edits = []
+        pieces = []
+        last = 0
+        for found in pattern.finditer(out):
+            new = build(found)
+            pieces.append(out[last:found.start()])
+            pieces.append(new)
+            edits.append((found.start(), found.end(), len(new)))
+            last = found.end()
+        pieces.append(out[last:])
+        out = "".join(pieces)
+        passes.append(edits)
+    return out, passes
+
+
+_SCRUB_PASSES = (
+    (SECRET_RE, lambda m: m.group(1) + m.group(2) + REDACTED),
+    (URL_SECRET_RE, lambda m: m.group(1) + REDACTED + m.group(3)),
+    (BEARER_RE, lambda m: m.group(1) + REDACTED),
+)
+
+
+def map_pos(passes, pos):
+    """Where position pos of the original text sits in the scrubbed text.
+
+    A position inside a replaced value lands at the start of the replacement.
+    """
+    for edits in passes:
+        shift = 0
+        for start, end, new_length in edits:
+            if start >= pos:
+                break
+            if end <= pos:
+                shift += new_length - (end - start)
+            else:
+                pos = start
+                break
+        pos += shift
+    return pos
+
+
 def scrub(text):
     """Remove anything shaped like a credential from text about to be shown.
 
@@ -275,10 +331,7 @@ def scrub(text):
     in its query string, and that excerpt is the most useful thing in the
     report, so it is printed with the token taken out rather than dropped.
     """
-    out = SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + REDACTED,
-                        "%s" % (text,))
-    out = URL_SECRET_RE.sub(lambda m: m.group(1) + REDACTED + m.group(3), out)
-    return BEARER_RE.sub(lambda m: m.group(1) + REDACTED, out)
+    return scrub_mapped(text)[0]
 
 
 def redact(text, *secrets):
@@ -520,7 +573,7 @@ def walk(node, path=()):
         # Numbers, booleans and null cannot hold an item id: they end here.
 
 
-def excerpt(text, pos, width=44):
+def excerpt(text, pos, width=44, mapped=None):
     """A one line, credential-free window onto the match.
 
     The excerpt is what makes a finding actionable: the difference between
@@ -528,22 +581,20 @@ def excerpt(text, pos, width=44):
     it". Whitespace is collapsed so that a pretty printed config does not put
     one finding across nine lines of a CSV cell.
 
-    Scrubbed BEFORE it is cut. Cut first, a window that starts inside
-    "token=" keeps the value and loses the key that scrub() looks for.
+    The whole text is scrubbed BEFORE it is cut. Cut first, a window that
+    starts inside "token=" keeps the value and loses the key that scrub()
+    looks for, and a window of any fixed size misses a value longer than it.
+    scan_text() passes mapped, one scrub_mapped() per body, so a body with a
+    thousand matches is scrubbed once.
     """
-    # ponytail: scrubs 1 KB either side, not the whole string, so one 4 MB
-    # body with a thousand matches is not scrubbed a thousand times. A secret
-    # value longer than that is not a token this tool has ever seen.
-    span_lo = max(0, pos - 1024)
-    span_hi = min(len(text), pos + ID_LENGTH + 1024)
-    clean = scrub(text[span_lo:span_hi])
-    at = len(scrub(text[span_lo:pos]))
+    clean, passes = mapped or scrub_mapped(text)
+    at = map_pos(passes, pos)
     lo = max(0, at - width)
     hi = min(len(clean), at + ID_LENGTH + width)
     body = " ".join(clean[lo:hi].split())
-    if lo > 0 or span_lo > 0:
+    if lo > 0:
         body = "..." + body
-    if hi < len(clean) or span_hi < len(text):
+    if hi < len(clean):
         body = body + "..."
     return body
 
@@ -571,14 +622,18 @@ def scan_text(target, text, path, source, url=None):
         found.extend((decoded, pos) for pos in url_positions(decoded, url))
     found.extend((text, pos) for pos in urls if (text, pos) not in found)
     out = []
+    scrubbed = {}
     for body, pos in sorted(found, key=lambda one: one[1]):
         kind = classify(path, token_at(body, pos))
         if kind is None:
             # A thumbnail url: a picture of the target, not a use of it.
             # Deleting the target loses the image and nothing else.
             continue
+        if body not in scrubbed:
+            scrubbed[body] = scrub_mapped(body)
         out.append({"kind": kind, "source": source, "path": path_label(path),
-                    "count": 1, "excerpt": excerpt(body, pos)})
+                    "count": 1,
+                    "excerpt": excerpt(body, pos, mapped=scrubbed[body])})
     return out
 
 
@@ -2658,10 +2713,45 @@ def self_test():
     wide_secret = ("x" * 2000 + " token=" + "s" * 1000 + "&id=" + TARGET
                    + "&token=" + "t" * 3000)
     cut = excerpt(wide_secret, wide_secret.index(TARGET))
-    check(cut.startswith("...") and cut.endswith("...") and TARGET in cut
+    check(cut.startswith("...") and TARGET in cut
           and "sss" not in cut and "ttt" not in cut,
           "a long value on either side is redacted and the excerpt still says "
-          "it was cut at both ends")
+          "it was cut at the front")
+    long_key = ("x" * 50 + " token=" + "Q" * 1100 + "\" itemId=" + TARGET
+                + " " + "y" * 200)
+    long_cut = excerpt(long_key, long_key.index(TARGET))
+    check("QQQQ" not in long_cut and TARGET in long_cut
+          and long_cut.endswith("..."),
+          "a token value longer than 1 KB, whose key sits more than 1 KB "
+          "before the id, is redacted and not printed from its last 44 "
+          "characters  <-- pinned defect")
+    long_hit = scan_text(TARGET, long_key, ("layers",), "data")
+    check(len(long_hit) == 1 and "QQQQ" not in long_hit[0]["excerpt"],
+          "and the same body scanned as a whole reaches the finding "
+          "scrubbed  <-- pinned defect")
+    twice = scan_text(TARGET, "token=SYNTHTWICE&a=%s&b=%s" % (TARGET, TARGET),
+                      ("layers",), "data")
+    check(len(twice) == 2 and all("SYNTHTWICE" not in hit["excerpt"]
+                                  for hit in twice),
+          "two matches in one body are both cut from the one scrubbed copy")
+    inside = excerpt("token=" + "S" * 50 + "&x=1", 20)
+    check("SSSS" not in inside and REDACTED in inside,
+          "an id that sits inside a replaced value maps to the start of the "
+          "replacement and prints nothing of the value")
+    encoded = ("https://viewer.example.org/index.html?url=https%3A%2F%2F"
+               "svc.example.org%2Fx%2FFeatureServer%3Ftoken%3D"
+               "SYNTHSECRETVALUE0123456789ABCDEF&itemid=" + TARGET)
+    encoded_hit = scan_text(TARGET, encoded, ("layers",), "data")
+    check(len(encoded_hit) == 1
+          and "SYNTHSECRET" not in encoded_hit[0]["excerpt"]
+          and REDACTED in encoded_hit[0]["excerpt"],
+          "a token behind a percent-encoded key and separator, %3Ftoken%3D, "
+          "is redacted in the excerpt  <-- pinned defect")
+    encoded_end = scrub("a%26sig%3AENCSECRET%2Bpad%26id%3D" + TARGET)
+    check("ENCSECRET" not in encoded_end and TARGET in encoded_end
+          and encoded_end.endswith(TARGET),
+          "an encoded value stops at the encoded ampersand, so the id after "
+          "it is kept  <-- pinned defect")
     check(redact("the token is TKN", "TKN") == "the token is %s" % REDACTED,
           "a caller's own token is redacted wherever it appears")
     check(redact("nothing", None, "") == "nothing",
