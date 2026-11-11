@@ -279,19 +279,26 @@ PASS  a prefix of --dashboard is refused, because it names a file the run will w
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-812 assertions, 0 failed
+828 assertions, 0 failed
 ```
 
-The full run prints all 812 assertions. It printed the same 812 lines on Windows under
+The full run prints all 828 assertions. It printed the same 828 lines on Windows under
 Python 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this
 block is cut.
 
-On Linux an earlier version of this self-test sometimes failed or ended in a traceback because a
-loopback stand-in connection did not complete; a rerun was green, and the failure was in the
-stand-in, not the sweep. Nine runs in a row of the current file were green, so how often it
-happens now is not known. `faulthandler` showed the client stuck in `socket.create_connection` with the stand-in
-idle, and a failed run ends with failed assertions or a traceback in a stand-in section,
-never a wrong answer. The cause was not found. It was never seen on Windows.
+Two different failures of this self-test were seen, and neither gave a wrong verdict.
+
+- On Windows, one run in nine under `coverage` failed one assertion, "an item the token may not
+  read reports BOTH endpoints as a problem". The stand-in listens on a random port and the
+  message for the resources call quotes the url, so the assertion that counted `403` in the
+  message counted the port as well whenever the port held `403`. Forcing port 40312 reproduced it
+  every time. The assertion now counts the portal's own words, `403 You do not have
+  permissions`, and the self-test passed on twelve ports chosen to hold `403`, `404`, `498` and
+  `500`.
+- On Linux an earlier version sometimes failed or ended in a traceback because a loopback
+  stand-in connection did not complete; a rerun was green. `faulthandler` showed the client
+  stuck in `socket.create_connection` with the stand-in idle. The cause was not found, and how
+  often it happens now is not known.
 
 Measured with `python -m coverage run --branch whobreaks.py --self-test`, the self-test covers
 100% of the statements and 100% of the branches of the file. No line is excluded, and no line
@@ -847,9 +854,12 @@ writes the nine finding columns: `id`, `title`, `type`, `owner`, `kind`, `source
 A spreadsheet runs a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return as a
 formula, and an item owner writes the title and the text an excerpt is cut from. `--format csv`
 puts one apostrophe in front of any text cell that starts with one of those six characters, in
-every column but `count`, which stays a number. OWASP lists these six, a line feed and the full-width forms, and
-names the single-quote prefix as the mitigation:
-https://owasp.org/www-community/attacks/CSV_Injection. Microsoft documents that an apostrophe
+every column but `count`, which stays a number. OWASP lists these six, a line feed and the
+full-width forms. It lists three techniques, which are double quotes around each field, a single
+quote before each field and doubled inner double quotes, and it adds that they "are not reliable in
+Microsoft Excel after saving and re-opening the CSV file". For Excel it describes a tab prefix
+instead: https://owasp.org/www-community/attacks/CSV_Injection. This tool follows the
+apostrophe form, as `xwddiff` does. Microsoft documents that an apostrophe
 typed before an entry makes Excel store it as text:
 https://support.microsoft.com/en-us/office/keeping-leading-zeros-and-large-numbers-1bf7b935-36e1-4985-842f-5dfa51f85fe7.
 The JSON report keeps the text as the portal holds it. The tool never reads a CSV back:
@@ -864,10 +874,17 @@ cut from it, so a token whose key is outside the excerpt is still replaced. `acc
 replaced as well as `token=`, and so are `client_secret=`, `secret=` and an Azure `sig=`, and so is a value written as `token="..."`, `password = '...'` or
 `"token": "..."`, and also when a backslash sits before each quote, as in a JSON body
 inside a notebook string. `secret_key=`, `access_key=`, `account_key=`, `private_key=`, `auth_key=`,
-`accesstoken=`, `refreshtoken=`, `authtoken=` and `sessiontoken=` are replaced in any case. An Esri API key written bare, with no key name in front of it, is replaced when
+`accesstoken=`, `refreshtoken=`, `authtoken=` and `sessiontoken=` are replaced in any case. A query parameter named `key`, as in `?key=VALUE`, is replaced
+too, also when the url is percent-encoded. An Esri API key written bare, with no key name in front of it, is replaced when
 it starts `AAPK` or `AAPT`. arcgis-rest-js tests for the `AAPK` prefix. The `AAPT` prefix is matched as a
 precaution and was not confirmed against an Esri page. A bare Google API key, `AIza` and 35 more characters, is replaced by its shape
-alone, which was not checked against a Google page. The path and source columns are scrubbed too, because a service url
+alone, which was not checked against a Google page. So is an AWS access key id that starts `AKIA`
+(a long-lived key) or `ASIA` (a temporary one), which AWS documents at
+https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html, a GitHub token that
+starts `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`, and a JSON Web Token, which is
+two parts that start `eyJ` and a signature. The AWS page gives the prefixes and not the length of
+the id, so the match is on the prefix and twelve or more capital letters and digits after it. The
+GitHub and JSON Web Token shapes were not checked against a vendor page. The path and source columns are scrubbed too, because a service url
 used as a JSON key or a resource name carries its token into them. An item title is scrubbed too, and so is the problem text of an
 item that could not be read, with the caller's own token removed from it even when no key name
 sits in front. The self-test asserts that no credential reaches stdout or either file.
@@ -875,7 +892,7 @@ sits in front. The self-test asserts that no credential reaches stdout or either
 The console replaces every control character in a line with `?`. That includes the title, the
 excerpt and an error message that quotes the portal. An item owner can put `ESC [2K` and a
 carriage return in a title, and on the console that rewrote the report line above it. The JSON
-and the JSON file keeps the title as the portal holds it. The CSV file guards it as above.
+report and the JSON graph file keep the title as the portal holds it. The CSV file guards it as above.
 
 With `--depth` above 1, the JSON report also carries `depth`, `beyond` and a `transitive` list.
 Each row has the item's `id`, `title` and `type`, its `hop`, the first-hop item as `via`, and
@@ -916,11 +933,11 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   on Windows stops before 1,500 levels, 3.12 and 3.13 on Windows parse 1,500 and stop before
   5,000, and 3.12 on Linux parses 5,000. An item between those depths is unread on one host and
   read on another. The self-test uses 100,000 levels, which no host parses.
-- Apart from an Esri API key that starts `AAPK` or `AAPT`, only a secret that follows a key name this tool knows is scrubbed: `token`, `password`,
+- Apart from the bare shapes named under "Output", only a secret that follows a key name this tool knows is scrubbed: `token`, `password`,
   `apikey`, `api_key`, `code_verifier`, `signature`, `secret` and `sig`, with any prefix such as
   `access_`, and the compound names `secret_key`, `access_key`, `account_key`, `private_key`,
-  `auth_key`, `access_token`, `refresh_token`, `auth_token` and `session_token`. A password passed as a bare positional argument, as in `GIS(url, "admin", "...")`,
-  is not recognised and is printed in the excerpt.
+  `auth_key`, `access_token`, `refresh_token`, `auth_token` and `session_token`. A password passed as a bare positional argument, as in `GIS(url, "admin", "...")`
+  or `arcpy.SignInToPortal(url, "user", "...")`, is not recognised and is printed in the excerpt.
 - A string with no separator in it that holds the target id thousands of times, such as ids
   joined by dashes, is slow to search. Each match reads the whole string again, so 2,000
   matches in one string took about ten seconds.
@@ -1007,6 +1024,11 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   as well.
 - `json.loads` keeps the last of two duplicate keys in a body, so a reference under the first copy
   is not seen.
+- A sweep that exits 2 before it writes leaves the earlier `--out` and `--graph` file in place, as it does
+  for `--dashboard`. A consumer that reads the file and not the exit code sees the last good
+  result as if it were current.
+- `--self-test` exits 1 when an assertion fails, the same code a sweep uses for "something
+  references the target". A wrapper that runs both must read the output to tell them apart.
 - The dashboard has no age marker. If the scheduled sweep starts to fail with exit 2, the page
   keeps showing the last good graph, with the graph-taken date as the only clue.
 - The published item is the graph as a JSON file, so watching it in the portal means opening that
@@ -1016,10 +1038,12 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   them.
 - The scrubber reads a percent-encoded key and separator such as `%3Ftoken%3D`, but a url that is
   encoded twice, as in `%253D`, is not recognised.
-- Only a value after a key name the scrubber knows is replaced, apart from an Esri API key that
-  starts `AAPK` or `AAPT`. A bare `key=VALUE`, `auth=`, `appid=` and `pass=`, `AccessKeyId=`, `credentials:` and `sessionid=` values next to
-  the target id, are printed and written as they are. A bare `key` and `auth` are left out on purpose, because
-  `"key"` is an ordinary JSON field and replacing its value would hide the target id. That holds for an item title too.
+- Only a value after a key name the scrubber knows is replaced, apart from the bare shapes named
+  under "Output". `auth=`, `appid=`, `pass=`, `code=`, `AccessKeyId=`, `credentials:`,
+  `sessionid=`, a cookie value such as `esri_auth=...` and `token VALUE` with only a space, next to
+  the target id, are printed and written as they are. A `key` is replaced only as a query
+  parameter, `?key=VALUE`, and `auth` is left out on purpose, because `"key"` is an ordinary JSON
+  field and replacing its value would hide the target id. That holds for an item title too.
 - A CSV report holds findings only. Read the exit code and the console for unread items, caveats
   and transitive rows, which only the JSON report carries. A person who opens an empty CSV after an
   incomplete sweep (exit 2) sees no gap.
@@ -1036,7 +1060,8 @@ and `taken`. The self-test asserts that no credential reaches this file either.
 - `--token` with an `http://` url on a host that is not loopback sends the token in the query
   string in clear. Only `--username` is refused on `http://`.
 - `urllib` follows a redirect from the portal to another host with the token still in the query
-  string, and the tool does not stop it. Trust the portal url and any proxy in front of it.
+  string, and the tool does not stop it. That includes a redirect from `https://` to `http://`,
+  which sends the token in clear. Trust the portal url and any proxy in front of it.
 - A search-result id and a resource name from an item are put in the request path as they are. A
   resource name that holds `../` can make a read of another endpoint on the same portal host with
   your token. It is a GET, and never another host.
@@ -1050,9 +1075,10 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   feature service. If a real portal answers those with an error, every such item is unread and
   every sweep exits 2. That is a safe failure, and it was not tried on a real portal.
 - The Microsoft page documents typing an apostrophe in a cell; it does not say what Excel shows for
-  an apostrophe loaded from a CSV, so the guard follows the OWASP recommendation and is not shown
-  to behave the same in Excel.
-- A formula character after leading spaces or invisible characters is not guarded.
+  an apostrophe loaded from a CSV, so the guard follows the spec and `xwddiff`, and OWASP's own note says the
+  single-quote technique is not reliable in Excel after a save and a re-open.
+- A formula character after leading spaces or invisible characters is not guarded, and neither is
+  a text cell that starts with a line feed or a full-width `=`, `+`, `-` or `@`.
 - A UTF-8 CSV with no byte order mark opens in Excel on Windows as ANSI, so non-ASCII titles can
   show garbled; the JSON report is unaffected.
 - A text value that holds a lone surrogate, such as JSON `"\ud800"` in a title, makes `--format

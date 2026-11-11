@@ -244,12 +244,16 @@ SECRET_KEYS = (r"token|password|passwd|pwd|apikey|api[-_]?key|code_verifier|"
                r"(?:access|refresh|auth|session)[-_]?token")
 SECRET_CAMEL = (r"Token|Password|Passwd|Pwd|ApiKey|Api[-_]?Key|Signature|"
                 r"Secret|Sig|Authorization")
+# A bare "key" is a credential only as a query parameter, ?key=VALUE, which is
+# how Google and many map-tile hosts take an API key. In a JSON body "key" is
+# usually a field name, so it is not a secret key there.
 # A viewer link carries a secured service url percent-encoded, so the key may
 # follow %3F or %26 and the separator may be %3D or %3A. The value of an
 # encoded url stops at an encoded & or quote, never inside base64's %2B.
 SECRET_RE = re.compile(
     r"((?:(?<![A-Za-z0-9])|(?<=%[0-9A-Fa-f]{2}))(?i:" + SECRET_KEYS
-    + r")|(?<=[a-z0-9])(?:" + SECRET_CAMEL + r"))"
+    + r")|(?:(?<=[?&])|(?<=%3[Ff])|(?<=%26))(?i:key)"
+    r"|(?<=[a-z0-9])(?:" + SECRET_CAMEL + r"))"
     r"((?:\\*[\"'])?\s*(?:[:=]|%3[AaDd])\s*)(\\*\"[^\"]*\"|\\*'[^']*'|"
     r"(?i:(?:bearer|basic)\s+)?(?:(?!%(?:26|22|27|20|2C|3B|3C|3E))"
     r"[^&\s\"'<>,;(){}\[\]])+)")
@@ -262,10 +266,19 @@ BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{8,})")
 # An Esri API key is a bare string with no key name in front of it. The prefix
 # AAPK is the one arcgis-rest-js tests for, and AAPT is the one Esri's access
 # token reference shows. A Google API key, AIza and 35 more characters, is the
-# other bare key a web map url carries. None can follow a letter or digit, so a
-# longer word that merely contains them is left alone.
+# other bare key a web map url carries. An AWS access key id, AKIA for a
+# long-lived key and ASIA for a temporary one, a GitHub token (ghp_, gho_,
+# ghu_, ghs_, ghr_ or github_pat_) and a JSON Web Token, two base64url parts
+# that begin eyJ and a signature, are the other bare credentials a note or a
+# notebook cell pastes next to a service url. None can follow a letter or
+# digit, so a longer word that merely contains them is left alone.
 APIKEY_RE = re.compile(r"(?<![A-Za-z0-9])(?:AAP[KT][A-Za-z0-9_.~-]{16,}|"
-                       r"AIza[A-Za-z0-9_-]{35})")
+                       r"AIza[A-Za-z0-9_-]{35}|"
+                       r"(?:AKIA|ASIA)[A-Z0-9]{12,}(?![A-Za-z0-9])|"
+                       r"(?:gh[pousr]_[A-Za-z0-9]{36,}|"
+                       r"github_pat_[A-Za-z0-9_]{22,})|"
+                       r"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\."
+                       r"[A-Za-z0-9_-]*)")
 
 # Characters that move a terminal's cursor or change what it shows. An item
 # title is typed by whoever owns the item, and one holding ESC [2K and a
@@ -2703,6 +2716,37 @@ def self_test():
           and scrub("AIza" + "S" * 5) == "AIza" + "S" * 5,
           "a Google API key with its own prefix is redacted and the id beside "
           "it is kept  <-- pinned defect")
+    for queried in ("https://tiles.example.org/x?key=S3CR3T&v=3",
+                    "https://tiles.example.org/x?v=3&KEY=S3CR3T",
+                    "viewer?url=https%3A%2F%2Ftiles.example.org%2Fx%3Fkey%3DS3CR3T"):
+        check("S3CR3T" not in scrub(queried),
+              "a plain key= query parameter, %s, is redacted, because it is "
+              "how a map tile host takes an API key  <-- pinned defect"
+              % queried)
+    check("Q" * 6 not in excerpt(TARGET + " /0?key=" + "Q" * 40, 0),
+          "an excerpt that ends inside a ?key= value does not print the part "
+          "of it that fits  <-- pinned defect")
+    check(scrub('{"key": "ds1"}') == '{"key": "ds1"}'
+          and scrub("monkey=abc") == "monkey=abc",
+          "while a JSON field named key, and a word ending in key, are left "
+          "alone")
+    bare = {"an AWS access key id": "AKIA" + "Q" * 16,
+            "an AWS temporary key id": "ASIA" + "Q" * 16,
+            "a GitHub token": "ghp_" + "Q" * 36,
+            "a GitHub fine-grained token": "github_pat_" + "Q" * 30,
+            "a JSON Web Token": "eyJ" + "Q" * 12 + ".eyJ" + "Q" * 12 + "."
+                                + "Q" * 20}
+    for what, secret in sorted(bare.items()):
+        text = "note: %s %s" % (secret, TARGET)
+        check("QQQQQQ" not in scrub(text) and TARGET in scrub(text),
+              "%s with no key name in front of it is redacted and the id "
+              "beside it is kept  <-- pinned defect" % what)
+        check(scrub("X" + secret) == "X" + secret,
+              "and %s inside a longer word is left alone" % what)
+    check(scrub("AKIA" + "Q" * 5) == "AKIA" + "Q" * 5
+          and scrub("ghp_" + "Q" * 5) == "ghp_" + "Q" * 5
+          and scrub("eyJ" + "Q" * 12 + ".nodot") == "eyJ" + "Q" * 12 + ".nodot",
+          "and a prefix too short to be that credential is left alone")
     check(scrub("mytoken=abc") == "mytoken=abc",
           "and a key that merely ends in token after a letter is left alone")
     for camel in ("accessToken=S3CR3T", '{"clientSecret": "S3CR3T"}',
@@ -4299,10 +4343,13 @@ def self_test():
               "an item whose /data is python comes back as text  "
               "<-- pinned defect")
         payloads, problem = read(PRIV_ID, 20)
-        check(payloads == [] and problem.count("403") == 2,
+        check(payloads == []
+              and problem.count("403 You do not have permissions") == 2,
               "an item the token may not read reports BOTH endpoints as a "
               "problem, because a 403 arrives as HTTP 200 with an error "
               "object  <-- pinned defect")
+        # The stand-in listens on a random port, and the resources message
+        # quotes it. Counting "403" failed whenever the port held 403.
         payloads, problem = read(PART_ID, 20)
         check([source for source, _body in payloads]
               == ["resources/text.json"],
