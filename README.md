@@ -279,10 +279,10 @@ PASS  a prefix of --dashboard is refused, because it names a file the run will w
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-797 assertions, 0 failed
+812 assertions, 0 failed
 ```
 
-The full run prints all 797 assertions. It printed the same 797 lines on Windows under
+The full run prints all 812 assertions. It printed the same 812 lines on Windows under
 Python 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this
 block is cut.
 
@@ -862,9 +862,13 @@ token in its query string, and that excerpt is the most useful line in the repor
 written with the token replaced rather than dropped. The text is scrubbed before the excerpt is
 cut from it, so a token whose key is outside the excerpt is still replaced. `access_token=` is
 replaced as well as `token=`, and so are `client_secret=`, `secret=` and an Azure `sig=`, and so is a value written as `token="..."`, `password = '...'` or
-`"token": "..."`. An Esri API key written bare, with no key name in front of it, is replaced when
-it starts `AAPK` or `AAPT`: arcgis-rest-js tests for the `AAPK` prefix, and Esri's access token
-reference shows an `AAPT` example. An item title is scrubbed too, and so is the problem text of an
+`"token": "..."`, and also when a backslash sits before each quote, as in a JSON body
+inside a notebook string. `secret_key=`, `access_key=`, `account_key=`, `private_key=`, `auth_key=`,
+`accesstoken=`, `refreshtoken=`, `authtoken=` and `sessiontoken=` are replaced in any case. An Esri API key written bare, with no key name in front of it, is replaced when
+it starts `AAPK` or `AAPT`. arcgis-rest-js tests for the `AAPK` prefix. The `AAPT` prefix is matched as a
+precaution and was not confirmed against an Esri page. A bare Google API key, `AIza` and 35 more characters, is replaced by its shape
+alone, which was not checked against a Google page. The path and source columns are scrubbed too, because a service url
+used as a JSON key or a resource name carries its token into them. An item title is scrubbed too, and so is the problem text of an
 item that could not be read, with the caller's own token removed from it even when no key name
 sits in front. The self-test asserts that no credential reaches stdout or either file.
 
@@ -914,7 +918,8 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   read on another. The self-test uses 100,000 levels, which no host parses.
 - Apart from an Esri API key that starts `AAPK` or `AAPT`, only a secret that follows a key name this tool knows is scrubbed: `token`, `password`,
   `apikey`, `api_key`, `code_verifier`, `signature`, `secret` and `sig`, with any prefix such as
-  `access_`. A password passed as a bare positional argument, as in `GIS(url, "admin", "...")`,
+  `access_`, and the compound names `secret_key`, `access_key`, `account_key`, `private_key`,
+  `auth_key`, `access_token`, `refresh_token`, `auth_token` and `session_token`. A password passed as a bare positional argument, as in `GIS(url, "admin", "...")`,
   is not recognised and is printed in the excerpt.
 - A string with no separator in it that holds the target id thousands of times, such as ids
   joined by dashes, is slow to search. Each match reads the whole string again, so 2,000
@@ -1012,14 +1017,17 @@ and `taken`. The self-test asserts that no credential reaches this file either.
 - The scrubber reads a percent-encoded key and separator such as `%3Ftoken%3D`, but a url that is
   encoded twice, as in `%253D`, is not recognised.
 - Only a value after a key name the scrubber knows is replaced, apart from an Esri API key that
-  starts `AAPK` or `AAPT`. A bare `key=VALUE`, and `credentials:` and `sessionid=` values next to
-  the target id, are printed and written as they are. That holds for an item title too.
+  starts `AAPK` or `AAPT`. A bare `key=VALUE`, `auth=`, `appid=` and `pass=`, `AccessKeyId=`, `credentials:` and `sessionid=` values next to
+  the target id, are printed and written as they are. A bare `key` and `auth` are left out on purpose, because
+  `"key"` is an ordinary JSON field and replacing its value would hide the target id. That holds for an item title too.
 - A CSV report holds findings only. Read the exit code and the console for unread items, caveats
   and transitive rows, which only the JSON report carries. A person who opens an empty CSV after an
   incomplete sweep (exit 2) sees no gap.
-- `argparse` echoes the value of an argument it does not recognise, so `--tokn SECRET` prints
-  `unrecognized arguments: --tokn SECRET` to stderr with exit 64. Use `WHOBREAKS_TOKEN` for
-  scheduled runs, and check the flag spelling before you type a secret on the command line.
+- An unrecognised argument is reported by name only: `--tokn SECRET` prints
+  `unrecognized arguments: --tokn` to stderr with exit 64, and a stray value with no flag is hidden.
+  `argparse` still quotes the value in its other messages, such as an invalid `--format` choice or a
+  non-numeric `--num`, so check the spelling of a flag before you type a secret after it. Use
+  `WHOBREAKS_TOKEN` for scheduled runs.
 - `--out` and `--graph` are not checked against the graph files that `--compare` reads, only
   `--dashboard` is. `--out week1.json --compare week1.json --apply` replaces the earlier graph with
   a report, so never name a `--compare` file as `--out`.

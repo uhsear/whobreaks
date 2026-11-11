@@ -235,9 +235,13 @@ URL_RIGHT = ALNUM | frozenset("-_")
 # in clear when only key=value was recognised. secret covers client_secret,
 # and sig is the key of an Azure shared access signature. A Bearer or Basic
 # scheme word before the value is part of the value, so the credential after
-# it is replaced and not the scheme word alone.
+# it is replaced and not the scheme word alone. A key and value written inside
+# a backslash-escaped string, {\"token\": \"VALUE\"} in a notebook cell, are
+# read too: a backslash may sit before each quote.
 SECRET_KEYS = (r"token|password|passwd|pwd|apikey|api[-_]?key|code_verifier|"
-               r"signature|secret|sig|authorization")
+               r"signature|secret|sig|authorization|"
+               r"(?:secret|access|account|private|auth)[-_]?key|"
+               r"(?:access|refresh|auth|session)[-_]?token")
 SECRET_CAMEL = (r"Token|Password|Passwd|Pwd|ApiKey|Api[-_]?Key|Signature|"
                 r"Secret|Sig|Authorization")
 # A viewer link carries a secured service url percent-encoded, so the key may
@@ -246,7 +250,7 @@ SECRET_CAMEL = (r"Token|Password|Passwd|Pwd|ApiKey|Api[-_]?Key|Signature|"
 SECRET_RE = re.compile(
     r"((?:(?<![A-Za-z0-9])|(?<=%[0-9A-Fa-f]{2}))(?i:" + SECRET_KEYS
     + r")|(?<=[a-z0-9])(?:" + SECRET_CAMEL + r"))"
-    r"([\"']?\s*(?:[:=]|%3[AaDd])\s*)(\"[^\"]*\"|'[^']*'|"
+    r"((?:\\*[\"'])?\s*(?:[:=]|%3[AaDd])\s*)(\\*\"[^\"]*\"|\\*'[^']*'|"
     r"(?i:(?:bearer|basic)\s+)?(?:(?!%(?:26|22|27|20|2C|3B|3C|3E))"
     r"[^&\s\"'<>,;(){}\[\]])+)")
 
@@ -257,9 +261,11 @@ BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{8,})")
 
 # An Esri API key is a bare string with no key name in front of it. The prefix
 # AAPK is the one arcgis-rest-js tests for, and AAPT is the one Esri's access
-# token reference shows. Neither can follow a letter or digit, so a longer word
-# that merely contains them is left alone.
-APIKEY_RE = re.compile(r"(?<![A-Za-z0-9])AAP[KT][A-Za-z0-9_.~-]{16,}")
+# token reference shows. A Google API key, AIza and 35 more characters, is the
+# other bare key a web map url carries. None can follow a letter or digit, so a
+# longer word that merely contains them is left alone.
+APIKEY_RE = re.compile(r"(?<![A-Za-z0-9])(?:AAP[KT][A-Za-z0-9_.~-]{16,}|"
+                       r"AIza[A-Za-z0-9_-]{35})")
 
 # Characters that move a terminal's cursor or change what it shows. An item
 # title is typed by whoever owns the item, and one holding ESC [2K and a
@@ -269,6 +275,9 @@ CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # A url path that ends here is a server, a web adaptor or the root of its
 # services, not one service. Searched for, it matches every service under it.
 SERVER_ROOTS = frozenset(("arcgis", "server", "portal", "rest", "services"))
+
+# A word on the command line that is an option name, with or without =VALUE.
+NAME_FLAG_RE = re.compile(r"--[A-Za-z][A-Za-z0-9_-]*(=|$)")
 
 # Columns of the CSV report, in order. Fixed, because a spreadsheet somebody
 # filtered on must not gain a column between runs.
@@ -638,7 +647,10 @@ def scan_text(target, text, path, source, url=None):
             continue
         if body not in scrubbed:
             scrubbed[body] = scrub_mapped(body)
-        out.append({"kind": kind, "source": source, "path": path_label(path),
+        # path and source are key and resource names the item author chose, and
+        # a service url used as a JSON key carries its token into them.
+        out.append({"kind": kind, "source": scrub(source),
+                    "path": scrub(path_label(path)),
                     "count": 1,
                     "excerpt": excerpt(body, pos, mapped=scrubbed[body])})
     return out
@@ -2676,6 +2688,21 @@ def self_test():
                                   len("x " * 30 + "AAPK" + "Q" * 41)),
           "an excerpt cut through the middle of an API key does not print "
           "its body  <-- pinned defect")
+    for named in ("SECRET_KEY=S3CR3T", "AccountKey=S3CR3T", "accesstoken=S3CR3T",
+                  "AWS_SECRET_ACCESS_KEY=S3CR3T", "private_key: 'S3CR3T'",
+                  "?auth_token=S3CR3T&f=json", "refreshtoken=S3CR3T",
+                  'token = \\"S3CR3T\\"', '{\\"token\\": \\"S3CR3T\\"}',
+                  "{\'token\': \'S3CR3T\'}"):
+        check("S3CR3T" not in scrub(named),
+              "a secret written as %s is redacted, a key such as secret_key or "
+              "access_key, or a quote with a backslash before it  "
+              "<-- pinned defect" % named)
+    gkey = "AIza" + "S" * 35
+    check(gkey not in scrub("js?key=%s&v=3 %s" % (gkey, TARGET))
+          and TARGET in scrub("js?key=%s&v=3 %s" % (gkey, TARGET))
+          and scrub("AIza" + "S" * 5) == "AIza" + "S" * 5,
+          "a Google API key with its own prefix is redacted and the id beside "
+          "it is kept  <-- pinned defect")
     check(scrub("mytoken=abc") == "mytoken=abc",
           "and a key that merely ends in token after a letter is left alone")
     for camel in ("accessToken=S3CR3T", '{"clientSecret": "S3CR3T"}',
@@ -4579,6 +4606,42 @@ def self_test():
                           lambda iid, size: ([], "403"))
         check("S3CR3T" not in json.dumps(sunread.unread),
               "and an unread item's title is scrubbed too  <-- pinned defect")
+        esc_src = ('payload = "{\\"token\\": \\"ESCSECRET1\\"}"; '
+                   'token = \\"ESCSECRET2\\"; svc = "%s"' % TARGET)
+        eleak = inspect(TARGET, {sitem: {"title": "nb", "type": "Notebook",
+                                         "owner": "o"}},
+                        lambda iid, size: ([("data", {"cells": [
+                            {"cell_type": "code", "source": [esc_src]}]})],
+                            None))
+        edoc = build_document(PORTAL, "q", TARGET, "t", eleak)
+        etext = " ".join(describe(eleak))
+        for ename, eout in (("leak2.json", write_json),
+                            ("leak2.csv", write_csv)):
+            with io.open(eout(edoc, os.path.join(workdir, ename)),
+                         encoding="utf-8") as handle:
+                etext += handle.read()
+        check("ESCSECRET" not in etext and REDACTED in etext,
+              "a credential written inside a backslash-escaped string in a "
+              "notebook cell reaches neither the console, the json report nor "
+              "the csv  <-- pinned defect")
+        pkey = "https://svc.example.org/x/FeatureServer?token=PATHSECRET99"
+        pleak = inspect(TARGET, {sitem: {"title": "t", "type": "Web Map",
+                                         "owner": "o"}},
+                        lambda iid, size: ([("resources/%s.json" % pkey,
+                                             {"overrides": {pkey: {
+                                                 "itemId": TARGET}}})], None))
+        pdoc = build_document(PORTAL, "q", TARGET, "t", pleak)
+        ptext = " ".join(describe(pleak))
+        for pname, pout in (("leak3.json", write_json),
+                            ("leak3.csv", write_csv)):
+            with io.open(pout(pdoc, os.path.join(workdir, pname)),
+                         encoding="utf-8") as handle:
+                ptext += handle.read()
+        check(len(pleak.findings) == 1 and "PATHSECRET99" not in ptext
+              and "overrides/https://svc.example.org" in ptext,
+              "a token in a service url used as a json key, or in a resource "
+              "name, reaches neither the console, the json report nor the "
+              "csv, through the path and source columns  <-- pinned defect")
         check(cell(7) == 7 and cell(-7) == -7 and cell(None) is None,
               "a number or a missing value passes through unguarded")
         gjson = write_json({"findings": [dict(gbase, title="=raw")]},
@@ -6022,6 +6085,28 @@ def self_test():
           "by every process on the box  <-- pinned defect")
     refuses(["--url", PORTAL, "--password", "hunter2"],
             "a --password flag is refused, it does not exist")
+    noise, sys.stderr = sys.stderr, io.StringIO()
+    try:
+        _parse(["--url", PORTAL, "--tokn", "TYPOSECRET9", "--tokn=EQSECRET9",
+                "stray"])
+    except SystemExit:
+        pass
+    finally:
+        typo_err, sys.stderr = sys.stderr.getvalue(), noise
+    check("TYPOSECRET9" not in typo_err and "EQSECRET9" not in typo_err
+          and "--tokn" in typo_err and "stray" not in typo_err,
+          "a mistyped --tokn prints the flag name and never the secret typed "
+          "after it  <-- pinned defect")
+    noise, sys.stderr = sys.stderr, io.StringIO()
+    try:
+        _parse(["--url", PORTAL, "TYPOSECRET9"])
+    except SystemExit:
+        pass
+    finally:
+        typo_err, sys.stderr = sys.stderr.getvalue(), noise
+    check("TYPOSECRET9" not in typo_err and "values hidden" in typo_err,
+          "and a stray value with no flag in front of it is hidden too  "
+          "<-- pinned defect")
     refuses(["--url", PORTAL, "--delete"],
             "there is no --delete flag either, this tool only reads  "
             "<-- pinned defect")
@@ -6114,8 +6199,24 @@ def tally(passed, failed):
 
 # ----------------------------------------------------------------------- cli
 
+class _QuietParser(argparse.ArgumentParser):
+    """An ArgumentParser that never echoes a value it did not understand.
+
+    argparse reports unrecognized arguments with their values, so a mistyped
+    --tokn SECRET printed the secret to stderr. Only the option names stay.
+    """
+
+    def error(self, message):
+        lead = "unrecognized arguments: "
+        if message.startswith(lead):
+            names = [word.split("=")[0] for word in message[len(lead):].split()
+                     if NAME_FLAG_RE.match(word)]
+            message = lead + " ".join(names or ["(values hidden)"])
+        super(_QuietParser, self).error(message)
+
+
 def _parse(argv):
-    ap = argparse.ArgumentParser(
+    ap = _QuietParser(
         prog="whobreaks.py",
         description="Report every item in an ArcGIS organization that "
                     "references the item you are about to delete.",
