@@ -1169,6 +1169,12 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   portal echoes it unencoded.
 - `--insecure` is accepted with `--token`, so the token then goes down a connection whose
   certificate is not checked. Only `--username` is refused with it.
+- `--insecure` is tested only by checking the TLS settings of the opener. No handshake against a
+  self-signed stub was run, so the internal-CA path was not exercised from end to end.
+- No self-test assertion exercises a lone surrogate in a title, so the `--format csv` failure
+  described above was shown by a direct run of the writer and is not pinned by the self-test.
+- The quoted self-test block near the top of this file has `...` lines where output was left out.
+  Every line shown matches a real run, in order, and the footer count is the full count.
 - A `whobreaks.py` checked out on Windows with `autocrlf` has CRLF line endings, so `./whobreaks.py`
   fails on Linux through the shebang. Run `python3 whobreaks.py`. The repository stores LF.
 - The owner, type and id columns, and the report's `owner` field, are written as the portal gives
