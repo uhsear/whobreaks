@@ -281,10 +281,10 @@ PASS  a prefix of --dashboard is refused, because it names a file the run will w
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-833 assertions, 0 failed
+840 assertions, 0 failed
 ```
 
-The full run prints all 833 assertions. It printed the same 833 lines on Windows under
+The full run prints all 840 assertions. It printed the same 840 lines on Windows under
 Python 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this
 block is cut.
 
@@ -875,7 +875,8 @@ written with the token replaced rather than dropped. The text is scrubbed before
 cut from it, so a token whose key is outside the excerpt is still replaced. `access_token=` is
 replaced as well as `token=`, and so are `client_secret=`, `secret=` and an Azure `sig=`, and so is a value written as `token="..."`, `password = '...'` or
 `"token": "..."`, and also when a backslash sits before each quote, as in a JSON body
-inside a notebook string. `secret_key=`, `access_key=`, `account_key=`, `private_key=`, `auth_key=`,
+inside a notebook string. A quoted value that holds a backslash-escaped quote, as in
+`password="ab\"cd"`, is replaced up to its real closing quote. `secret_key=`, `access_key=`, `account_key=`, `private_key=`, `auth_key=`,
 `accesstoken=`, `refreshtoken=`, `authtoken=` and `sessiontoken=` are replaced in any case. A query parameter named `key`, as in `?key=VALUE`, is replaced
 too, also when the url is percent-encoded. An Esri API key written bare, with no key name in front of it, is replaced when
 it starts `AAPK` or `AAPT`. arcgis-rest-js tests for the `AAPK` prefix. The `AAPT` prefix is matched as a
@@ -1108,6 +1109,26 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   `myaccesstoken=`, is not scrubbed either. These print as written next to the target id.
 - A secret that holds a space and is not quoted is replaced only up to the space, and
   `Bearer%20VALUE` in a url is replaced only up to the `%20`.
+- An unquoted secret value also ends at any of `,` `;` `(` `)` `{` `}` `[` `]`, so
+  `password=ab;cd1234` leaves `;cd1234` in the excerpt.
+- A quoted value that ends in a backslash before its closing quote, such as `"C:\"`, is read as
+  an escaped quote. The match then runs to the next quote, so it can hide more text than the
+  value, and it does not leave the value in clear.
+- The scrubber knows a key only when the key starts with, or ends in, a name from its list.
+  Run-together lower case keys such as `tokenvalue`, `dbpassword`, `userpassword` or
+  `clientsecret`, and a nested `"credential": {...}` object, print as written next to the target id.
+- A portal error that holds a camel case key hides the number next to it, so `generateToken: 400`
+  prints as `generateToken: [redacted]`. That is safe and less useful for diagnosis.
+- A gateway that answers `200` with an HTML page for `/data` is searched as text and counted as
+  read. Only a JSON error object or an HTTP error status marks an item as unread, so such a
+  sweep can exit 0.
+- An item can hide its own reference from the sweep by looking like one of this tool's graph
+  items: the type `Code Attachment`, the tags `whobreaks` and `whobreaks-<id>`, or a JSON body
+  with `whobreaks_graph` set to 1 and the same target. This needs deliberate forgery by the item
+  owner.
+- A body that the server ends by closing the connection, with no `Content-Length` and no chunking,
+  and that is cut early, is read as the whole body. Nothing detects the cut, and an id past the
+  cut is never searched.
 - Bare tokens with no key name in front of them, such as GitLab `glpat-`, Slack `xoxb-` or `sk-`
   keys, are not recognised. Only the bare shapes named under "Output" are.
 - A token or password that `urlencode` would change is removed from a portal error only when the

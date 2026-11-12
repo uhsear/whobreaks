@@ -237,7 +237,9 @@ URL_RIGHT = ALNUM | frozenset("-_")
 # scheme word before the value is part of the value, so the credential after
 # it is replaced and not the scheme word alone. A key and value written inside
 # a backslash-escaped string, {\"token\": \"VALUE\"} in a notebook cell, are
-# read too: a backslash may sit before each quote.
+# read too: a backslash may sit before each quote. A quoted value may hold a
+# backslash-escaped quote, "ab\"cd", and the match runs to the closing quote.
+# A value whose quote is not closed that way falls back to the first quote.
 SECRET_KEYS = (r"token|password|passwd|passphrase|credentials?|pwd|apikey|api[-_]?key|code_verifier|"
                r"signature|secret|sig|authorization|"
                r"(?:secret|access|account|private|auth)[-_]?key|"
@@ -254,7 +256,8 @@ SECRET_RE = re.compile(
     r"((?:(?<![A-Za-z0-9])|(?<=%[0-9A-Fa-f]{2}))(?i:" + SECRET_KEYS
     + r")|(?:(?<=[?&])|(?<=%3[Ff])|(?<=%26))(?i:key)"
     r"|(?<=[a-z0-9])(?:" + SECRET_CAMEL + r"))"
-    r"((?:\\*[\"'])?\s*(?:[:=]|%3[AaDd])\s*)(\\*\"[^\"]*\"|\\*'[^']*'|"
+    r"((?:\\*[\"'])?\s*(?:[:=]|%3[AaDd])\s*)(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|"
+    r"\\*\"[^\"]*\"|\\*'[^']*'|"
     r"(?i:(?:bearer|basic)\s+)?(?:(?!%(?:26|22|27|20|2C|3B|3C|3E))"
     r"[^&\s\"'<>,;(){}\[\]])+)")
 
@@ -2778,6 +2781,26 @@ def self_test():
     check(scrub('password = "S3CR3T two words"') == 'password = %s' % REDACTED,
           "a quoted value is redacted to its closing quote, so the words "
           "after a space in it do not survive")
+    for quote in ('"', "'"):
+        tail = "ab" + chr(92) + quote + "TAILSECRET99"
+        for form in ("password=" + quote + tail + quote,
+                     "{" + chr(34) + "token" + chr(34) + ": " + quote + tail
+                     + quote + "}"):
+            check("TAILSECRET99" not in scrub(form) and REDACTED in scrub(form),
+                  "a quoted secret that holds a backslash-escaped quote, %s, "
+                  "is redacted to its real closing quote, not its first inner "
+                  "quote  <-- pinned defect" % form)
+    escaped_pair = ("{" + chr(92) + chr(34) + "token" + chr(92) + chr(34)
+                    + ": " + chr(92) + chr(34) + "S3CR3T" + chr(92) + chr(34)
+                    + ", " + chr(92) + chr(34) + "n" + chr(92) + chr(34)
+                    + ": 1}")
+    check("S3CR3T" not in scrub(escaped_pair) and ": 1}" in scrub(escaped_pair),
+          "and a value inside a backslash-escaped string still ends at its own "
+          "escaped closing quote, so the field after it survives")
+    check(scrub('password="C:' + chr(92) + '" next') != 'password="C:'
+          + chr(92) + '" next',
+          "while a value that ends in a backslash before its closing quote "
+          "is still redacted")
     check(scrub('{"tokenExpiration": 60, "token": {"a": 1}}')
           == '{"tokenExpiration": 60, "token": {"a": 1}}',
           "and a key that only starts with token, or a token key holding an "
@@ -2789,6 +2812,13 @@ def self_test():
           and "content.get" in kwarg[0]["excerpt"],
           "so a notebook cell that signs in with a keyword argument next to "
           "the id prints the call and not the key  <-- pinned defect")
+    tail_hit = scan_payload(TARGET, {"cells": [{"cell_type": "code", "source": [
+        'gis = GIS("https://x.example", "svc", password="ab' + chr(92)
+        + '"TAILSECRET99"); item = gis.content.get("%s")' % TARGET]}]}, "data")
+    check(len(tail_hit) == 1 and "TAILSECRET99" not in tail_hit[0]["excerpt"]
+          and "content.get" in tail_hit[0]["excerpt"],
+          "so a notebook cell whose password holds an escaped quote prints "
+          "the call and none of the password's tail  <-- pinned defect")
     camel_hit = scan_payload(TARGET, {"cells": [{"cell_type": "code", "source": [
         'conn = connect(accessToken="eyJ.S3CR3T.SIG"); '
         'lyr = get("%s")' % TARGET]}]}, "data")
