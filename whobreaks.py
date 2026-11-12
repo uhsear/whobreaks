@@ -242,11 +242,11 @@ URL_RIGHT = ALNUM | frozenset("-_")
 # read too: a backslash may sit before each quote. A quoted value may hold a
 # backslash-escaped quote, "ab\"cd", and the match runs to the closing quote.
 # A value whose quote is not closed that way falls back to the first quote.
-SECRET_KEYS = (r"token|password|passwd|passphrase|credentials?|pwd|apikey|api[-_]?key|code_verifier|"
+SECRET_KEYS = (r"token|password|passwd|passphrase|credentials?|pwd|pass|pw|apikey|api[-_]?key|code_verifier|"
                r"signature|secret|sig|authorization|"
                r"(?:secret|access|account|private|auth)[-_]?key|"
                r"(?:access|refresh|auth|session)[-_]?token")
-SECRET_CAMEL = (r"Token|Password|Passwd|Passphrase|Credentials?|Pwd|ApiKey|Api[-_]?Key|Signature|"
+SECRET_CAMEL = (r"Token|Password|Passwd|Passphrase|Credentials?|Pwd|Pass|Pw|ApiKey|Api[-_]?Key|Signature|"
                 r"Secret|Sig|Authorization")
 # A bare "key" is a credential only as a query parameter, ?key=VALUE, which is
 # how Google and many map-tile hosts take an API key. In a JSON body "key" is
@@ -262,6 +262,43 @@ SECRET_RE = re.compile(
     r"\\*\"[^\"]*\"|\\*'[^']*'|"
     r"(?i:(?:bearer|basic)\s+)?(?:(?!%(?:26|22|27|20|2C|3B|3C|3E))"
     r"[^&\s\"'<>,;(){}\[\]])+)")
+
+# A setting written as a pair of fields, the secret in one and the name of the
+# setting in the other: {"name": "dbPassword", "value": "VALUE"} in a JSON list
+# of settings, and <add key="ClientSecret" value="VALUE"/> in a web.config. No
+# key name sits next to the value, so SECRET_RE cannot see it. The name may come
+# first or second, and may hold a prefix or a suffix around the word.
+_PAIR_NAME = (r"[A-Za-z0-9_.:-]*(?i:password|passwd|passphrase|pwd|pass|pw|"
+              r"secret|token|api[-_]?key|credentials?|signature|"
+              r"access[-_]?key|private[-_]?key|account[-_]?key|"
+              r"authorization)[A-Za-z0-9_.:-]*")
+_PAIR_VALUE = (r"(\\*\"[^\"]*\"|\\*'[^']*'|[^\s,;\"'<>(){}\[\]/]+)")
+PAIR_NAME_FIRST_RE = re.compile(
+    r"((?<![A-Za-z0-9])\\*[\"']?(?i:name|key)\\*[\"']?\s*[:=]\s*\\*[\"']"
+    + _PAIR_NAME + r"\\*[\"']\s*,?\s*\\*[\"']?(?i:value|val)\\*[\"']?"
+    r"\s*[:=]\s*)" + _PAIR_VALUE)
+PAIR_VALUE_FIRST_RE = re.compile(
+    r"((?<![A-Za-z0-9])\\*[\"']?(?i:value|val)\\*[\"']?\s*[:=]\s*)"
+    + _PAIR_VALUE + r"(\s*,?\s*\\*[\"']?(?i:name|key)\\*[\"']?\s*[:=]\s*"
+    r"\\*[\"']" + _PAIR_NAME + r"\\*[\"'])")
+
+# The same words as an XML element, <password>VALUE</password>, which carries
+# the value as text and has no = or : to anchor on.
+XML_SECRET_RE = re.compile(r"(<" + _PAIR_NAME + r"\s*>\s*)([^<\s][^<]*)(?=</)")
+
+# A JSON field named "key" holds a credential as often as a name, and a value
+# printed next to the target id was a leak. Its value is replaced, unless the
+# value is an item id: the id being traced sits in such a field in some
+# configurations, and hiding it would hide the answer.
+KEYFIELD_RE = re.compile(
+    r"((?<![A-Za-z0-9])\\*[\"']key\\*[\"']\s*:\s*)"
+    r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|\\*\"[^\"]*\"|\\*'[^']*')", re.I)
+
+
+def _keyfield_value(match):
+    value = match.group(2).strip("\\\"'")
+    return match.group(0) if looks_like_item_id(value) else match.group(1) + REDACTED
+
 
 # A password inside a url, scheme://user:password@host, and a Bearer token
 # written without a key in front of it, as in a header copied into a note.
@@ -320,6 +357,10 @@ SERVER_ROOTS = frozenset(("arcgis", "server", "portal", "rest", "services"))
 # A word on the command line that is an option name, with or without =VALUE.
 NAME_FLAG_RE = re.compile(r"--[A-Za-z][A-Za-z0-9_-]*(=|$)")
 
+# The start of an HTML page, after any comments and whitespace.
+HTML_PAGE_RE = re.compile(r"\s*(?:<!--.*?-->\s*)*<(?:!doctype\s+html|html|head|body)(?![A-Za-z0-9])",
+                          re.I | re.S)
+
 # Columns of the CSV report, in order. Fixed, because a spreadsheet somebody
 # filtered on must not gain a column between runs.
 CSV_FIELDS = ("id", "title", "type", "owner", "kind", "source", "path",
@@ -357,6 +398,10 @@ def scrub_mapped(text):
 
 _SCRUB_PASSES = (
     (SECRET_RE, lambda m: m.group(1) + m.group(2) + REDACTED),
+    (PAIR_NAME_FIRST_RE, lambda m: m.group(1) + REDACTED),
+    (PAIR_VALUE_FIRST_RE, lambda m: m.group(1) + REDACTED + m.group(3)),
+    (XML_SECRET_RE, lambda m: m.group(1) + REDACTED),
+    (KEYFIELD_RE, _keyfield_value),
     (URL_SECRET_RE, lambda m: m.group(1) + REDACTED + m.group(3)),
     (BEARER_RE, lambda m: m.group(1) + REDACTED),
     (APIKEY_RE, lambda m: REDACTED),
@@ -1921,6 +1966,17 @@ def decode_body(raw):
     return text
 
 
+def looks_like_html(body):
+    """True when a text body is an HTML page: a doctype, html, head or body tag.
+
+    A gateway, a web application firewall and a captive portal each answer
+    HTTP 200 with a page of this kind in place of the item, and the page holds
+    no reference to anything.
+    """
+    return (isinstance(body, str)
+            and HTML_PAGE_RE.match(body[:4096]) is not None)
+
+
 def portal_fetch(url, token, insecure=False):
     """Build the search callable the enumeration drives.
 
@@ -1983,6 +2039,11 @@ def portal_reader(url, token, insecure=False, max_size=MAX_ITEM_SIZE,
             problems.append("%s: %s" % (source, redact(problem, token)))
         elif body is not None:
             payloads.append((source, body))
+            if looks_like_html(body):
+                problems.append("%s: the body is an HTML page, not item data, "
+                                "so a gateway or proxy may have answered in "
+                                "place of the portal. It was searched as text"
+                                % source)
 
     def listed(iid):
         """Every row of the resource listing, over as many pages as it has.
@@ -2784,10 +2845,55 @@ def self_test():
     check("Q" * 6 not in excerpt(TARGET + " /0?key=" + "Q" * 40, 0),
           "an excerpt that ends inside a ?key= value does not print the part "
           "of it that fits  <-- pinned defect")
-    check(scrub('{"key": "ds1"}') == '{"key": "ds1"}'
-          and scrub("monkey=abc") == "monkey=abc",
-          "while a JSON field named key, and a word ending in key, are left "
-          "alone")
+    check(scrub("monkey=abc") == "monkey=abc"
+          and scrub('{"monkey": "abc"}') == '{"monkey": "abc"}',
+          "a word ending in key is left alone")
+    for keyed in ('{"key": "S3CR3T"}', '{"key":"S3CR3T","itemId":"x"}',
+                  "{'key': 'S3CR3T'}", '{\\"key\\": \\"S3CR3T\\"}',
+                  '{"KEY": "S3CR3T"}'):
+        check("S3CR3T" not in scrub(keyed),
+              "a JSON field named key, %s, has its value redacted, because a "
+              "credential sat there and printed beside the target id  "
+              "<-- pinned defect" % keyed)
+    keyed_id = '{"key": "%s", "title": "Sites"}' % TARGET
+    check(scrub(keyed_id) == keyed_id,
+          "but a key field that holds an item id is kept, because the id is "
+          "what the run looks for  <-- pinned defect")
+    pairs = {
+        "a web.config password": '<add key="password" value="S3CR3T"/>',
+        "a web.config client secret":
+            '<add key="ClientSecret" value="S3CR3T" />',
+        "a web.config api key": "<add key='ApiKey' value='S3CR3T'/>",
+        "a JSON name and value": '{"name":"password","value":"S3CR3T"}',
+        "a JSON dbPassword pair": '{"name": "dbPassword", "value": "S3CR3T"}',
+        "an escaped name and value":
+            '{\\"name\\": \\"password\\", \\"value\\": \\"S3CR3T\\"}',
+        "a number value": '{"name":"pwd","value":S3CR3T}',
+        "a value before its name": '{"value":"S3CR3T","name":"password"}',
+        "a web.config value before its key":
+            '<add value="S3CR3T" key="ApiKey"/>',
+        "a pass field": '{"pass":"S3CR3T"}',
+        "a pw field": '{"pw":"S3CR3T"}',
+        "a credentials object":
+            '{"credentials":{"user":"u","pass":"S3CR3T"}}',
+        "a dbPass key": "dbPass=S3CR3T",
+        "an XML password element": "<password>S3CR3T</password>",
+        "an XML client secret element":
+            "<clientSecret>\n  S3CR3T\n</clientSecret>",
+    }
+    for what, text in sorted(pairs.items()):
+        both = "%s %s" % (text, TARGET)
+        check("S3CR3T" not in scrub(both) and TARGET in scrub(both),
+              "%s is redacted and the id beside it is kept  "
+              "<-- pinned defect" % what)
+    plain = ('<add key="appName" value="Sites"/>',
+             '{"name": "title", "value": "Sites"}',
+             '{"value": "Sites", "name": "title"}',
+             "<title>Sites</title>", "<password/>")
+    for text in plain:
+        check(scrub(text) == text,
+              "a setting pair that is not a secret, %s, is left as written"
+              % text)
     bare = {"an AWS access key id": "AKIA" + "Q" * 16,
             "an AWS temporary key id": "ASIA" + "Q" * 16,
             "a GitHub token": "ghp_" + "Q" * 36,
@@ -3962,6 +4068,8 @@ def self_test():
     PHOTO_ID = "9f" + "0" * 30
     DEEP_ID = "9c" + "0" * 30
     CUT_ID = "9b" + "0" * 30
+    HTML_ID = "9a" + "0" * 30
+    XML_ID = "99" + "0" * 30
     PASSWORD = "hunter2-live"
     LIVE_TOKEN = "LIVE-TOKEN-0123456789"
 
@@ -4025,6 +4133,11 @@ def self_test():
         ECHO_ID: {"error": {"code": 498, "message":
                             "Invalid token %s for user" % LIVE_TOKEN}},
         DEEP_ID: "[" * 100000 + '"%s"' % TARGET + "]" * 100000,
+        # A gateway page in place of the item, and a real XML configuration.
+        HTML_ID: "\n<!-- blocked -->\n<!DOCTYPE html><html><body>Request "
+                 "blocked by gateway</body></html>",
+        XML_ID: '<?xml version="1.0"?><config><layer id="%s"/></config>'
+                % TARGET,
         W_APP: {"values": {"webmap": W_MAP}},
         W_SITE: {"widgets": [{"type": "app", "itemId": W_APP}]},
         W_EMBED: {"widgets": [{"type": "embed", "itemId": W_DOC}]},
@@ -4497,6 +4610,32 @@ def self_test():
               "a body the connection cut short is a problem, because "
               "HTTPResponse.read does not raise and the half was searched as "
               "if it were the whole  <-- pinned defect")
+        payloads, problem = read(HTML_ID, 20)
+        check([source for source, _body in payloads] == ["data"]
+              and "HTML page" in (problem or ""),
+              "a 200 answer that is an HTML page, a gateway or firewall block "
+              "page, is searched as text and its item is unread, because "
+              "nothing was learned about it  <-- pinned defect")
+        html_report = inspect(TARGET, catalog({"id": HTML_ID},
+                                              {"id": DASH_ID}), read)
+        check([one["id"] for one in html_report.unread] == [HTML_ID]
+              and html_report.kind_of(DASH_ID) == HARD,
+              "and the real hard break beside it is still reported  "
+              "<-- pinned defect")
+        html_alone = inspect(TARGET, catalog({"id": HTML_ID}), read)
+        check(exit_code(html_alone) == 2 and not html_alone.findings,
+              "so a sweep whose only item answered with a block page exits 2 "
+              "and not 0, the code for clean  <-- pinned defect")
+        payloads, problem = read(XML_ID, 20)
+        check(problem is None and isinstance(payloads[0][1], str),
+              "an XML body is not an HTML page: it is read, with no problem")
+        check(looks_like_html("<HTML lang='en'>") and looks_like_html(
+            "  <head><title>x</title>") and not looks_like_html("<html5>")
+              and not looks_like_html("<b>html</b>")
+              and not looks_like_html({"a": 1})
+              and not looks_like_html("print('<html>')"),
+              "an HTML page starts with a doctype, html, head or body tag, in "
+              "any case, and nothing else is taken for one")
         cut_report = inspect(TARGET, catalog({"id": CUT_ID}), read)
         check([one["id"] for one in cut_report.unread] == [CUT_ID]
               and exit_code(cut_report) == 2,

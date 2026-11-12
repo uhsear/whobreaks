@@ -102,6 +102,12 @@ PASS  a token value longer than 1 KB, whose key sits more than 1 KB before the i
 ...
 PASS  a token behind a percent-encoded key and separator, %3Ftoken%3D, is redacted in the excerpt  <-- pinned defect
 ...
+PASS  a JSON field named key, {"key": "S3CR3T"}, has its value redacted, because a credential sat there and printed beside the target id  <-- pinned defect
+PASS  but a key field that holds an item id is kept, because the id is what the run looks for  <-- pinned defect
+...
+PASS  a web.config password is redacted and the id beside it is kept  <-- pinned defect
+PASS  an XML password element is redacted and the id beside it is kept  <-- pinned defect
+...
 PASS  the fold joins two findings only when the file, the path AND the class all match  <-- pinned defect
 ...
 PASS  an app whose url names it in the QUERY STRING is left to the id search, because without that query it is every app of the same template in the org  <-- pinned defect
@@ -269,6 +275,9 @@ PASS  a token whose user is not an administrator cannot search another user's pr
 PASS  and the graph file carries the caveat next to complete  <-- pinned defect
 PASS  and the page does not show the green banner, nor claim that nothing loads the target  <-- pinned defect
 ...
+PASS  a 200 answer that is an HTML page, a gateway or firewall block page, is searched as text and its item is unread, because nothing was learned about it  <-- pinned defect
+PASS  so a sweep whose only item answered with a block page exits 2 and not 0, the code for clean  <-- pinned defect
+...
 PASS  a unique prefix of --publish is refused, because it names a write to the organization  <-- pinned defect
 ...
 PASS  a title, a type, a target and a url that hold markup are escaped, so an item owner cannot put script on the page  <-- pinned defect
@@ -281,10 +290,10 @@ PASS  a prefix of --dashboard is refused, because it names a file the run will w
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-854 assertions, 0 failed
+885 assertions, 0 failed
 ```
 
-The full run prints all 854 assertions. It printed the same 854 lines on Windows under
+The full run prints all 885 assertions. It printed the same 885 lines on Windows under
 Python 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this
 block is cut.
 
@@ -811,7 +820,7 @@ It refuses, or reports as unknown, rather than guessing:
 |---|---|
 | 0 | nothing references the target, every item was enumerated and read, an administrator's token was sent, no `--query` was given, and the target itself was among the items searched. The last three are the conditions under which an empty result means an empty organization |
 | 1 | something references it, listed worst first |
-| 2 | the sweep could not be completed, so nothing can be concluded. Also an empty result with no token, with a token whose user is not an administrator, with a `--query`, or with a target that was not among the items searched. An item was unreadable or read in part, the target item itself was unreadable, a search slice sat on the 10,000 ceiling, or a search page held a result with no usable id. Also when `--apply` could not write a file it was asked for, the page included, when `--publish` was refused or could not be confirmed by reading the item back, and when the tool met a failure it did not foresee |
+| 2 | the sweep could not be completed, so nothing can be concluded. Also an empty result with no token, with a token whose user is not an administrator, with a `--query`, or with a target that was not among the items searched. An item was unreadable, read in part or answered with an HTML page, the target item itself was unreadable, a search slice sat on the 10,000 ceiling, or a search page held a result with no usable id. Also when `--apply` could not write a file it was asked for, the page included, when `--publish` was refused or could not be confirmed by reading the item back, and when the tool met a failure it did not foresee |
 | 64 | usage error, including a flag that is unknown or has a bad value, a graph file that is missing, is not a graph, or covers a different scope, and an `--out`, `--graph` or `--dashboard` that is a folder or that names one file twice, and a `--dashboard` that names a graph file the run reads. Also a `--publish` with no token, with a value that is not an item id, or with two `--compare` files |
 
 `--depth` and a one-file `--compare` do not change the exit code of the sweep. A two-file
@@ -878,7 +887,10 @@ replaced as well as `token=`, and so are `client_secret=`, `secret=` and an Azur
 inside a notebook string. A quoted value that holds a backslash-escaped quote, as in
 `password="ab\"cd"`, is replaced up to its real closing quote. `secret_key=`, `access_key=`, `account_key=`, `private_key=`, `auth_key=`,
 `accesstoken=`, `refreshtoken=`, `authtoken=` and `sessiontoken=` are replaced in any case. A query parameter named `key`, as in `?key=VALUE`, is replaced
-too, also when the url is percent-encoded. An Esri API key written bare, with no key name in front of it, is replaced when
+too, also when the url is percent-encoded. A JSON field named `key` has its value replaced, as in `{"key": "VALUE"}`, unless the value is an
+item id. A key named `pass` or `pw` is replaced. A setting written as two fields, the name in one and the secret in the other, is replaced
+when the name holds a secret word, as in `{"name": "dbPassword", "value": "VALUE"}` and `<add key="ClientSecret" value="VALUE"/>`, with the
+value in either order. The text of an XML element such as `<password>VALUE</password>` is replaced too. An Esri API key written bare, with no key name in front of it, is replaced when
 it starts `AAPK` or `AAPT`. arcgis-rest-js tests for the `AAPK` prefix. The `AAPT` prefix is matched as a
 precaution and was not confirmed against an Esri page. A bare Google API key, `AIza` and 35 more characters, is replaced by its shape
 alone, which was not checked against a Google page. So is an AWS access key id that starts `AKIA`
@@ -1021,6 +1033,9 @@ and `taken`. The self-test asserts that no credential reaches this file either.
 - `diff_graphs` checks that the item an edge names was in both sweeps, but not that the item
   holding the reference was. An app that drops out of the sweep without being deleted, because the
   sweeping account lost sight of it, prints as a removed reference.
+- The tab and carriage return guard on the excerpt column is tested by direct calls to the writer,
+  because the sweep collapses the white space of an excerpt first, so a leading tab or carriage
+  return in a portal value never reaches that cell.
 - The CSV guard covers the six characters above and nothing else. OWASP also lists a line feed
   and the full-width `=`, `+`, `-` and `@` as leading characters. The guard does not prefix those.
   Whether Excel shows the apostrophe after it opens a CSV was not tested; no spreadsheet runs
@@ -1050,11 +1065,16 @@ and `taken`. The self-test asserts that no credential reaches this file either.
 - The scrubber reads a percent-encoded key and separator such as `%3Ftoken%3D`, but a url that is
   encoded twice, as in `%253D`, is not recognised.
 - Only a value after a key name the scrubber knows is replaced, apart from the bare shapes named
-  under "Output". `auth=`, `appid=`, `pass=`, `code=`, `AccessKeyId=`,
+  under "Output". `auth=`, `appid=`, `code=`, `AccessKeyId=`,
   `sessionid=`, a cookie value such as `esri_auth=...` and `token VALUE` with only a space, next to
-  the target id, are printed and written as they are. A `key` is replaced only as a query
-  parameter, `?key=VALUE`, and `auth` is left out on purpose, because `"key"` is an ordinary JSON
-  field and replacing its value would hide the target id. That holds for an item title too.
+  the target id, are printed and written as they are. `auth` is left out on purpose, because it is
+  an ordinary word. That holds for an item title too.
+- Every value of a JSON field named `key` is replaced, including an ordinary name such as
+  `"key": "dataSource_1"`, because a credential cannot be told from a name by its shape. Only an
+  item id is kept. An XML attribute `key="..."` is not replaced on its own, only as the name half
+  of a setting pair.
+- A setting pair is recognised only when its fields are called `name` or `key`, and `value` or
+  `val`. `sharingKey` as a field name, and a pair named in other words, print as written.
 - A CSV report holds findings only. Read the exit code and the console for unread items, caveats
   and transitive rows, which only the JSON report carries. A person who opens an empty CSV after an
   incomplete sweep (exit 2) sees no gap.
@@ -1112,7 +1132,7 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   scrubber. A portal user name and an item type are not expected to hold a secret.
 - `cell()` guards only `str` values. A non-string `owner` in a hand-built document is written as it
   is. A portal gives strings there.
-- The scrubber does not recognise `pw=`, `sas=`, `bearer=`, `secretAccessKey=`, `sessionKey=`,
+- The scrubber does not recognise `sas=`, `bearer=`, `secretAccessKey=`, `sessionKey=`,
   `userpass=`, or a phrase such as `password is VALUE`. A key name with a prefix, such as
   `myaccesstoken=`, is not scrubbed either. These print as written next to the target id.
 - A secret that holds a space and is not quoted is replaced only up to the space, and
@@ -1127,9 +1147,13 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   `clientsecret`, and a nested `"credential": {...}` object, print as written next to the target id.
 - A portal error that holds a camel case key hides the number next to it, so `generateToken: 400`
   prints as `generateToken: [redacted]`. That is safe and less useful for diagnosis.
-- A gateway that answers `200` with an HTML page for `/data` is searched as text and counted as
-  read. Only a JSON error object or an HTTP error status marks an item as unread, so such a
-  sweep can exit 0.
+- A `200` answer for `/data` or a resource that starts with an HTML doctype, `<html`, `<head` or
+  `<body` tag is searched as text and marks its item as unread, so a gateway or firewall block
+  page makes the sweep exit 2. A block page in plain text, with no such tag, is not recognised and
+  is read as ordinary text, so such a sweep can exit 0. An item whose real data is an HTML file
+  is marked unread each time.
+- Only a JSON error object of the form `{"error": {...}}` marks an item as unread. A string-valued
+  `error` field, as in `{"error": "denied"}`, is read as ordinary data.
 - An item can hide its own reference from the sweep by looking like one of this tool's graph
   items: the type `Code Attachment`, the tags `whobreaks` and `whobreaks-<id>`, or a JSON body
   with `whobreaks_graph` set to 1 and the same target. This needs deliberate forgery by the item
