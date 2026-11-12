@@ -78,6 +78,8 @@ SEARCH_CEILING = 10000
 # API offers nothing this tool can split on, so the slice is reported as
 # unproven instead.
 DAY_MS = 86400000
+# How far past this machine's clock the sweep asks for items: one year.
+CLOCK_SLACK_MS = 366 * DAY_MS
 
 # No ArcGIS item predates the epoch, so the first slice starts here rather than
 # at a date somebody has to maintain.
@@ -266,6 +268,29 @@ SECRET_RE = re.compile(
 URL_SECRET_RE = re.compile(r"(?i)(://[^/\s:@]+:)([^/\s@]+)(@)")
 BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{8,})")
 
+# A password written as the third argument of a sign-in call, with no key name
+# in front of it: GIS(url, "user", "pw") and arcpy.SignInToPortal(url, "user",
+# "pw"). Only a quoted literal is replaced. A bare name there is a variable.
+_CALL_ARG = r"""(?:"[^"]*"|'[^']*'|[\w.\[\]]*(?:\([^()]*\))?)"""
+SIGNIN_RE = re.compile(r"(\b(?:GIS|SignInToPortal)\s*\(\s*" + _CALL_ARG
+                       + r"\s*,\s*" + _CALL_ARG + r"\s*,\s*)(\"[^\"]*\"|'[^']*')")
+
+# A command line option followed by its value after a space or a comma, as in
+# --password VALUE, -Password 'VALUE' and "--password", "VALUE" in an argument
+# list. A value that starts with a hyphen is the next option, not a value.
+FLAG_SECRET_RE = re.compile(
+    r"((?<![A-Za-z0-9])-{1,2}(?i:" + SECRET_KEYS
+    + r")(?![A-Za-z0-9])[\"']?[\s,]+)"
+    r"(\"[^\"]*\"|'[^']*'|[^\s\"'<>,;(){}\[\]-][^\s\"'<>,;(){}\[\]]*)")
+
+# pwd and passwd are not English words, so a value after them and a space is a
+# password, as in a connection string written PWD VALUE. The word "password"
+# is prose too often, so there only a quoted value is taken.
+SPACE_SECRET_RE = re.compile(
+    r"((?<![A-Za-z0-9])(?i:pwd|passwd)\s+)"
+    r"(\"[^\"]*\"|'[^']*'|[^\s\"'<>,;(){}\[\]]+)"
+    r"|((?<![A-Za-z0-9])(?i:password|passphrase)\s+)(\"[^\"]*\"|'[^']*')")
+
 # An Esri API key is a bare string with no key name in front of it. The prefix
 # AAPK is the one arcgis-rest-js tests for, and AAPT is the one Esri's access
 # token reference shows. A Google API key, AIza and 35 more characters, is the
@@ -312,7 +337,9 @@ def scrub_mapped(text):
     """
     out = "%s" % (text,)
     passes = []
-    for pattern, build in _SCRUB_PASSES:
+    known = _known_secrets[0]
+    for pattern, build in (((known, lambda m: REDACTED),) + _SCRUB_PASSES
+                           if known else _SCRUB_PASSES):
         edits = []
         pieces = []
         last = 0
@@ -333,7 +360,30 @@ _SCRUB_PASSES = (
     (URL_SECRET_RE, lambda m: m.group(1) + REDACTED + m.group(3)),
     (BEARER_RE, lambda m: m.group(1) + REDACTED),
     (APIKEY_RE, lambda m: REDACTED),
+    (SIGNIN_RE, lambda m: m.group(1) + REDACTED),
+    (FLAG_SECRET_RE, lambda m: m.group(1) + REDACTED),
+    (SPACE_SECRET_RE, lambda m: (m.group(1) or m.group(3)) + REDACTED),
 )
+
+# The operator's own token and password, known exactly after sign-in. They are
+# removed from every scrubbed string whatever key name, or none, sits in front.
+# A secret shorter than this would also remove ordinary words, so it is left to
+# the shaped passes.
+MIN_KNOWN_SECRET = 6
+_known_secrets = [None]
+
+
+def know_secrets(*secrets):
+    """Remember the caller's own secrets so that scrub() removes them exactly.
+
+    Called with nothing, it forgets them. A secret shorter than
+    MIN_KNOWN_SECRET characters is ignored.
+    """
+    kept = sorted(set(text for text in ("%s" % (one,) for one in secrets if one)
+                      if len(text) >= MIN_KNOWN_SECRET),
+                  key=lambda text: (-len(text), text))
+    _known_secrets[0] = (re.compile("|".join(re.escape(text) for text in kept))
+                         if kept else None)
 
 
 def map_pos(passes, pos):
@@ -894,7 +944,9 @@ def sweep(fetch, base="", now_ms=None, num=SEARCH_MAX_NUM,
     be searched, and a partial search that says so beats no search at all.
     """
     if now_ms is None:
-        now_ms = int(time.time() * 1000)
+        # A portal clock that runs ahead stamps new items later than this
+        # machine's now, and a slice that stopped at now never asked for them.
+        now_ms = int(time.time() * 1000) + CLOCK_SLACK_MS
     if max_partitions < 1:
         raise ValueError("--max-slices must be at least 1")
     pending = [(EPOCH_START_MS, int(now_ms))]
@@ -1853,6 +1905,9 @@ def decode_body(raw):
     if raw is None:
         return None
     text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    # A JSON file saved by some Windows tools starts with a byte order mark,
+    # which json.loads refuses, and the body was then searched as prose.
+    text = text.lstrip(u"\ufeff")
     if not text.strip():
         return None
     try:
@@ -3672,6 +3727,19 @@ def self_test():
     sweep(capped_fetch, base="orgid:ORG", now_ms=NOW, echo=echoes.append)
     check(any("splitting" in line for line in echoes),
           "the split is echoed, so nobody wonders why the sweep slowed down")
+    asked = []
+
+    def future_fetch(query, start, num):
+        asked.append(query)
+        return {"total": 0, "results": [], "nextStart": -1}
+
+    before = int(time.time() * 1000)
+    sweep(future_fetch, base="orgid:ORG")
+    asked_hi = int(asked[0].split(" TO ")[1].rstrip("]"))
+    check(asked_hi >= before + 300 * DAY_MS,
+          "a sweep that is not given a clock asks for items created long after "
+          "this machine's now, so a portal clock that runs ahead cannot hide "
+          "a new item behind the upper bound  <-- pinned defect")
 
     def always_capped(query, start, num):
         page = pages(ROWS[:100])(query, start, num)
@@ -3772,6 +3840,17 @@ def self_test():
           "a body that is not utf-8 is decoded with replacement, so an id "
           "inside a binary upload is still found  <-- pinned defect")
     check(decode_body(None) is None, "no body at all is nothing")
+    check(decode_body(b"\xef\xbb\xbf" + b'{"a": 1}') == {"a": 1}
+          and decode_body(u"\ufeff[1]") == [1]
+          and decode_body(b"\xef\xbb\xbf") is None,
+          "a json body saved with a byte order mark is parsed, as bytes or as "
+          "text, and a body of only the mark is nothing  <-- pinned defect")
+    bom_hits = scan_payload(TARGET, decode_body(
+        b"\xef\xbb\xbf" + json.dumps({"operationalLayers": [
+            {"itemId": TARGET}]}).encode("ascii")), "data")
+    check(len(bom_hits) == 1 and bom_hits[0]["kind"] == HARD,
+          "so a hard break in such a file is a hard break and not a mention "
+          "of '(not json)'  <-- pinned defect")
     check(portal_error({"error": {"code": 403, "message": "no"}})
           == "403 no", "a portal error envelope is recognised")
     check(portal_error({"id": "ORG"}) is None, "an ordinary body is not one")
@@ -4721,6 +4800,89 @@ def self_test():
               "a token in a service url used as a json key, or in a resource "
               "name, reaches neither the console, the json report nor the "
               "csv, through the path and source columns  <-- pinned defect")
+        pw_shapes = (
+            ("a positional password in a GIS() call",
+             'gis = GIS("https://x.example/portal", "svc", "POSPW99"); '
+             'lyr = gis.content.get("%s")' % TARGET),
+            ("a positional password in arcpy.SignInToPortal",
+             "arcpy.SignInToPortal(url, user, 'POSPW99'); "
+             "item = '%s'" % TARGET),
+            ("a --password option followed by a space",
+             'run(["sync", "--password", "POSPW99"]); get("%s")' % TARGET),
+            ("a PowerShell -Password parameter",
+             "Run-Sync -Password 'POSPW99'; $item = '%s'" % TARGET),
+            ("a PWD value after a space in a connection string",
+             "conn = 'Server=db;PWD POSPW99'; item = '%s'" % TARGET),
+            ("a quoted value after the word password",
+             'login(password "POSPW99"); item = "%s"' % TARGET))
+        for pw_label, pw_src in pw_shapes:
+            pw_report = inspect(
+                TARGET, {sitem: {"title": "t", "type": "Code Attachment",
+                                 "owner": "o"}},
+                lambda iid, size, src=pw_src: ([("data", src)], None))
+            pw_doc = build_document(PORTAL, "q", TARGET, "t", pw_report)
+            pw_text = " ".join(describe(pw_report))
+            for pw_name, pw_out in (("pw.json", write_json),
+                                    ("pw.csv", write_csv)):
+                with io.open(pw_out(pw_doc, os.path.join(workdir, pw_name)),
+                             encoding="utf-8") as handle:
+                    pw_text += handle.read()
+            check(len(pw_report.findings) == 1 and "POSPW99" not in pw_text
+                  and REDACTED in pw_text and TARGET in pw_text,
+                  "%s reaches neither the console, the json report nor the "
+                  "csv, and the id beside it is kept  <-- pinned defect"
+                  % pw_label)
+        check(scrub("sign in with GIS(url, user, pw) then run") ==
+              "sign in with GIS(url, user, pw) then run"
+              and scrub('GIS(url, "user", password)') ==
+              'GIS(url, "user", password)'
+              and scrub("the password reset page, pwd") ==
+              "the password reset page, pwd"
+              and scrub("sync --password --user x") ==
+              "sync --password --user x",
+              "while a call whose password is a variable, prose that says "
+              "password, a bare pwd and an option followed by another "
+              "option are left alone")
+        args = _parse(["--url", LIVE, "--target", TARGET,
+                       "--token", LIVE_TOKEN])
+        _authenticate(args)
+        tok_items = {sitem: {"title": "has tok %s" % LIVE_TOKEN,
+                             "type": "Web Map", "owner": "o"}}
+        tok_report = inspect(
+            TARGET, tok_items,
+            lambda iid, size: ([("data", {"layers": [
+                {"url": "https://svc.example.org/x?foo=%s&id=%s"
+                 % (LIVE_TOKEN, TARGET)},
+                {"note": "token %s item %s" % (LIVE_TOKEN, TARGET)}]})],
+                None))
+        tok_doc = build_document(PORTAL, "q", TARGET, "t", tok_report)
+        tok_text = " ".join(describe(tok_report))
+        for tok_name, tok_out in (("tok.json", write_json),
+                                  ("tok.csv", write_csv)):
+            with io.open(tok_out(tok_doc, os.path.join(workdir, tok_name)),
+                         encoding="utf-8") as handle:
+                tok_text += handle.read()
+        know_secrets()
+        check(len(tok_report.findings) == 2 and LIVE_TOKEN not in tok_text
+              and "has tok" in tok_text and TARGET in tok_text,
+              "the operator's own token, found in a title or beside the id "
+              "under a key the scrubber does not know, reaches neither the "
+              "console, the json report nor the csv  <-- pinned defect")
+        know_secrets(LIVE_TOKEN, "ab", None, 12345678)
+        check(scrub("x %s y ab 12345678" % LIVE_TOKEN)
+              == "x %s y ab %s" % (REDACTED, REDACTED)
+              and scrub("ab") == "ab",
+              "an own secret is removed wherever it sits, a number is coerced "
+              "to text, and one shorter than %d characters is ignored, so "
+              "ordinary words survive" % MIN_KNOWN_SECRET)
+        know_secrets("")
+        check(scrub("x %s" % LIVE_TOKEN) == "x %s" % LIVE_TOKEN,
+              "and forgetting them restores the shaped passes alone")
+        code, seen = captured(lambda: main(
+            ["--url", LIVE, "--target", TARGET, "--token", LIVE_TOKEN]))
+        check(scrub("x %s" % LIVE_TOKEN) == "x %s" % LIVE_TOKEN,
+              "a run of main() forgets the secrets it learned, so one run "
+              "never scrubs the next with another operator's token")
         check(cell(7) == 7 and cell(-7) == -7 and cell(None) is None,
               "a number or a missing value passes through unguarded")
         gjson = write_json({"findings": [dict(gbase, title="=raw")]},
@@ -6375,12 +6537,17 @@ def _parse(argv):
 
 def _authenticate(args):
     """Return a token, or None for an anonymous read."""
+    secret = None
     if args.token:
-        return args.token
-    if not args.username:
-        return os.environ.get(TOKEN_ENV) or None
-    secret = read_secret(args.username)
-    return generate_token(args.url, args.username, secret, args.insecure)
+        token = args.token
+    elif not args.username:
+        token = os.environ.get(TOKEN_ENV) or None
+    else:
+        secret = read_secret(args.username)
+        know_secrets(secret)
+        token = generate_token(args.url, args.username, secret, args.insecure)
+    know_secrets(token, secret)
+    return token
 
 
 def main(argv=None):
@@ -6396,6 +6563,8 @@ def main(argv=None):
         # not tell, and that is exit 2.
         complain("unexpected %s: %s" % (type(exc).__name__, scrub(exc)))
         return 2
+    finally:
+        know_secrets()
 
 
 def _same_file(first, second):

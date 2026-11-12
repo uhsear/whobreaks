@@ -281,10 +281,10 @@ PASS  a prefix of --dashboard is refused, because it names a file the run will w
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-840 assertions, 0 failed
+854 assertions, 0 failed
 ```
 
-The full run prints all 840 assertions. It printed the same 840 lines on Windows under
+The full run prints all 854 assertions. It printed the same 854 lines on Windows under
 Python 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this
 block is cut.
 
@@ -890,7 +890,14 @@ the id, so the match is on the prefix and twelve or more capital letters and dig
 GitHub and JSON Web Token shapes were not checked against a vendor page. The path and source columns are scrubbed too, because a service url
 used as a JSON key or a resource name carries its token into them. An item title is scrubbed too, and so is the problem text of an
 item that could not be read, with the caller's own token removed from it even when no key name
-sits in front. The self-test asserts that no credential reaches stdout or either file.
+sits in front. The operator's own token and password, once signed in, are removed from every title,
+excerpt, source and path as well, wherever they sit and under any key or none, but only when they
+are at least six characters long, because a shorter one would also remove ordinary words. A sign-in
+call with a quoted third argument, `GIS(url, "user", "...")` or `arcpy.SignInToPortal(url, "user",
+"...")`, loses that argument. A value after a command line option and a space or comma, such as
+`--password VALUE`, `-Password 'VALUE'` and `"--password", "VALUE"`, is replaced, and so is a value
+after `pwd` or `passwd` and a space, or a quoted value after the word `password`. The self-test
+asserts that no credential reaches stdout or either file.
 
 The console replaces every control character in a line with `?`. That includes the title, the
 excerpt and an error message that quotes the portal. An item owner can put `ESC [2K` and a
@@ -939,8 +946,9 @@ and `taken`. The self-test asserts that no credential reaches this file either.
 - Apart from the bare shapes named under "Output", only a secret that follows a key name this tool knows is scrubbed: `token`, `password`,
   `apikey`, `api_key`, `code_verifier`, `signature`, `secret` and `sig`, with any prefix such as
   `access_`, and the compound names `secret_key`, `access_key`, `account_key`, `private_key`,
-  `auth_key`, `access_token`, `refresh_token`, `auth_token` and `session_token`. A password passed as a bare positional argument, as in `GIS(url, "admin", "...")`
-  or `arcpy.SignInToPortal(url, "user", "...")`, is not recognised and is printed in the excerpt.
+  `auth_key`, `access_token`, `refresh_token`, `auth_token` and `session_token`. A positional password is recognised only as the third quoted argument of `GIS(` or
+  `SignInToPortal(`. Any other call that takes a password without a key name, such as `connect(user, "...")`, is not recognised and is printed in
+  the excerpt. So is an unquoted value after the word `password` and a space.
 - A string with no separator in it that holds the target id thousands of times, such as ids
   joined by dashes, is slow to search. Each match reads the whole string again, so 2,000
   matches in one string took about ten seconds.
@@ -998,9 +1006,9 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   account signs in as that account.
 - Group membership, folder structure and sharing are out of scope. This tool answers one
   question: what would break.
-- A sweep covers items created up to the clock of the machine that runs it, so an item created
-  after that moment, or dated in the future, is not searched. The count still matches, so the run
-  can exit 0.
+- A sweep covers items created up to one year after the clock of the machine that runs it, so a
+  portal clock that runs ahead by minutes is covered. An item dated more than a year ahead is not
+  searched. The count still matches, so the run can exit 0.
 - Only `--dashboard` is checked against the `--compare` file. `--out` or `--graph` naming it
   replaces the baseline with a report or a new graph, and the next run exits 64 with `is not a
   whobreaks graph file`.
@@ -1137,6 +1145,19 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   certificate is not checked. Only `--username` is refused with it.
 - A `whobreaks.py` checked out on Windows with `autocrlf` has CRLF line endings, so `./whobreaks.py`
   fails on Linux through the shebang. Run `python3 whobreaks.py`. The repository stores LF.
+- The owner, type and id columns, and the report's `owner` field, are written as the portal gives
+  them and are not scrubbed. ArcGIS user names cannot hold a token, so this needs a hostile portal.
+- The excerpt is a window of 44 characters each side of the id, taken after the scrub. A secret
+  that sits further than that from the id is not shown, but one that sits inside the window and
+  has a shape this tool does not know is printed as written.
+- A portal clock that runs ahead by more than a year, or Python older than 3.9, is not guarded.
+  An interpreter that cannot compile the file dies with a traceback and exit 1, the code for
+  "references exist".
+- The statement that an administrator's search returns other members' private items was not
+  confirmed against an Esri page. The Esri Search page says only that results contain items the
+  user may access.
+- The CLI path to the CSV writer is tested with plain text, and the formula guard with direct
+  calls to the writer. The two are covered by separate tests.
 - `--self-test` takes about 40 seconds, because it starts a loopback server and makes many HTTP calls.
 - The description of `f1729/whobreaks` in "Related" was checked against that repository's GitHub
   description only, not against its code.
