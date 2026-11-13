@@ -312,8 +312,11 @@ BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{8,})")
 # any case, because a notebook wraps its sign-in in a helper of its own. Only a
 # quoted literal is replaced. A bare name there is a variable.
 _CALL_ARG = r"""(?:"[^"]*"|'[^']*'|[\w.\[\]]*(?:\([^()]*\))?)"""
-SIGNIN_RE = re.compile(r"(\b(?:GIS|SignInToPortal|(?i:\w*(?:connect|log(?:in|on)|"
-                       r"sign_?in|authenticate)\w*))\s*\(\s*" + _CALL_ARG
+# The name is bounded to 80 characters: two unbounded \w* around the keyword
+# made a long word with no "(" after it cost quadratic time in scrub().
+SIGNIN_RE = re.compile(r"(\b(?:GIS|SignInToPortal|(?i:(?=\w{0,80}?(?:connect|"
+                       r"log(?:in|on)|sign_?in|authenticate))\w{1,80}))\s*\(\s*"
+                       + _CALL_ARG
                        + r"\s*,\s*" + _CALL_ARG + r"\s*,\s*)(\"[^\"]*\"|'[^']*')")
 
 # A command line option followed by its value after a space or a comma, as in
@@ -2850,6 +2853,10 @@ def self_test():
           "out of the excerpt  <-- pinned defect")
     check(REDACTED in scrub("url?token=SECRET123&f=json"),
           "scrub replaces the token value and keeps the rest readable")
+    started = time.monotonic()
+    scrub("connect" * 9200)
+    check(time.monotonic() - started < 1.0,
+          "a 64 KB word with no call in it is scrubbed in under a second")
     check(scrub("password=hunter2") == "password=[redacted]",
           "a password in a config value is replaced by that exact word, not "
           "by whatever REDACTED happens to hold  <-- pinned defect")
