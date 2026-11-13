@@ -312,10 +312,11 @@ BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{8,})")
 # any case, because a notebook wraps its sign-in in a helper of its own. Only a
 # quoted literal is replaced. A bare name there is a variable.
 _CALL_ARG = r"""(?:"[^"]*"|'[^']*'|[\w.\[\]]*(?:\([^()]*\))?)"""
-# The name is bounded to 80 characters: two unbounded \w* around the keyword
-# made a long word with no "(" after it cost quadratic time in scrub().
-SIGNIN_RE = re.compile(r"(\b(?:GIS|SignInToPortal|(?i:(?=\w{0,80}?(?:connect|"
-                       r"log(?:in|on)|sign_?in|authenticate))\w{1,80}))\s*\(\s*"
+# The keyword is found by a lookahead and the name taken once by \w+. Two
+# \w* around the keyword made a long word with no "(" after it cost
+# quadratic time in scrub(); \b allows one start per word, so this is linear.
+SIGNIN_RE = re.compile(r"(\b(?:GIS|SignInToPortal|(?i:(?=\w*?(?:connect|"
+                       r"log(?:in|on)|sign_?in|authenticate))\w+))\s*\(\s*"
                        + _CALL_ARG
                        + r"\s*,\s*" + _CALL_ARG + r"\s*,\s*)(\"[^\"]*\"|'[^']*')")
 
@@ -2857,6 +2858,8 @@ def self_test():
     scrub("connect" * 9200)
     check(time.monotonic() - started < 1.0,
           "a 64 KB word with no call in it is scrubbed in under a second")
+    check("pw5" not in scrub("x" * 100 + "_login(h, \"u\", \"pw5\")"),
+          "a sign-in call whose name is longer than 80 characters is redacted")
     check(scrub("password=hunter2") == "password=[redacted]",
           "a password in a config value is replaced by that exact word, not "
           "by whatever REDACTED happens to hold  <-- pinned defect")
