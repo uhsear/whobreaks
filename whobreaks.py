@@ -306,10 +306,14 @@ URL_SECRET_RE = re.compile(r"(?i)(://[^/\s:@]+:)([^/\s@]+)(@)")
 BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{8,})")
 
 # A password written as the third argument of a sign-in call, with no key name
-# in front of it: GIS(url, "user", "pw") and arcpy.SignInToPortal(url, "user",
-# "pw"). Only a quoted literal is replaced. A bare name there is a variable.
+# in front of it: GIS(url, "user", "pw"), arcpy.SignInToPortal(url, "user",
+# "pw") and connect(host, "user", "pw"). Besides those two names, a call whose
+# name holds connect, login, logon, signin, sign_in or authenticate counts, in
+# any case, because a notebook wraps its sign-in in a helper of its own. Only a
+# quoted literal is replaced. A bare name there is a variable.
 _CALL_ARG = r"""(?:"[^"]*"|'[^']*'|[\w.\[\]]*(?:\([^()]*\))?)"""
-SIGNIN_RE = re.compile(r"(\b(?:GIS|SignInToPortal)\s*\(\s*" + _CALL_ARG
+SIGNIN_RE = re.compile(r"(\b(?:GIS|SignInToPortal|(?i:\w*(?:connect|log(?:in|on)|"
+                       r"sign_?in|authenticate)\w*))\s*\(\s*" + _CALL_ARG
                        + r"\s*,\s*" + _CALL_ARG + r"\s*,\s*)(\"[^\"]*\"|'[^']*')")
 
 # A command line option followed by its value after a space or a comma, as in
@@ -357,9 +361,14 @@ SERVER_ROOTS = frozenset(("arcgis", "server", "portal", "rest", "services"))
 # A word on the command line that is an option name, with or without =VALUE.
 NAME_FLAG_RE = re.compile(r"--[A-Za-z][A-Za-z0-9_-]*(=|$)")
 
-# The start of an HTML page, after any comments and whitespace.
-HTML_PAGE_RE = re.compile(r"\s*(?:<!--.*?-->\s*)*<(?:!doctype\s+html|html|head|body)(?![A-Za-z0-9])",
-                          re.I | re.S)
+# The first tag of an HTML page. looks_like_html() skips the comments and the
+# whitespace before it in a loop, not in the pattern: a pattern that skipped
+# them took exponential time on a body of repeated comments.
+HTML_PAGE_RE = re.compile(r"<(?:!doctype\s+html|html|head|body)(?![A-Za-z0-9])",
+                          re.I)
+
+# The path of a body that did not parse as JSON, such as a Python script.
+RAW_PATH = ("(not json)",)
 
 # Columns of the CSV report, in order. Fixed, because a spreadsheet somebody
 # filtered on must not gain a column between runs.
@@ -654,6 +663,27 @@ def classify(path, token):
     return kind
 
 
+def kind_at(path, text, pos):
+    """classify() for the id at pos of text, with a look at the code around it.
+
+    A body that is not JSON has no structure to read, so classify() can only
+    call it a mention. That is wrong for a script that loads the item:
+    gis.content.get("<id>") stops working when the item goes. In such a body an
+    id inside a string literal, on a line that has an open parenthesis before
+    it and no # before it, is an argument of a call, and is HARD. An id in a
+    comment, a docstring or an assignment stays a mention.
+
+    shortcut: one line only, and a # inside a string hides the call. A call
+    split over lines, or a print() of the id, is not told from a load.
+    """
+    kind = classify(path, token_at(text, pos))
+    if path != RAW_PATH or kind != MENTION:
+        return kind
+    before = text[text.rfind("\n", 0, pos) + 1:pos]
+    quoted = before.count('"') % 2 or before.count("'") % 2
+    return HARD if quoted and "(" in before and "#" not in before else kind
+
+
 def walk(node, path=()):
     """Yield (path, text) for every string in a parsed configuration.
 
@@ -751,7 +781,7 @@ def scan_text(target, text, path, source, url=None):
     out = []
     scrubbed = {}
     for body, pos in sorted(found, key=lambda one: one[1]):
-        kind = classify(path, token_at(body, pos))
+        kind = kind_at(path, body, pos)
         if kind is None:
             # A thumbnail url: a picture of the target, not a use of it.
             # Deleting the target loses the image and nothing else.
@@ -797,7 +827,7 @@ def strings_of(payload, source):
     if isinstance(payload, (dict, list)):
         return walk(payload)
     if isinstance(payload, str):
-        return [(("(not json)",), payload)]
+        return [(RAW_PATH, payload)]
     if payload is None:
         return []
     raise ValueError("%s is a %s, which is not a fetched body"
@@ -842,7 +872,7 @@ def item_refs(meta, payloads, known, skip=()):
                 other = known.get(match.group(0))
                 if other is None or other in skip:
                     continue
-                kind = classify(path, token_at(text, match.start()))
+                kind = kind_at(path, text, match.start())
                 if kind is not None and RANK[kind] > RANK.get(worst.get(other),
                                                               0):
                     worst[other] = kind
@@ -1973,8 +2003,15 @@ def looks_like_html(body):
     HTTP 200 with a page of this kind in place of the item, and the page holds
     no reference to anything.
     """
-    return (isinstance(body, str)
-            and HTML_PAGE_RE.match(body[:4096]) is not None)
+    if not isinstance(body, str):
+        return False
+    head = body[:4096].lstrip()
+    while head.startswith("<!--"):
+        end = head.find("-->", 4)
+        if end < 0:
+            return False
+        head = head[end + 3:].lstrip()
+    return HTML_PAGE_RE.match(head) is not None
 
 
 def portal_fetch(url, token, insecure=False):
@@ -2756,11 +2793,32 @@ def self_test():
     # ---- bodies that are not JSON at all
     raw_hits = scan_payload(TARGET, "gis.content.get('%s')  # nightly"
                             % TARGET, "data (not json)")
-    check([hit["kind"] for hit in raw_hits] == [MENTION],
-          "an item whose /data is not JSON is still searched, as prose  "
-          "<-- pinned defect")
+    check([hit["kind"] for hit in raw_hits] == [HARD],
+          "an item whose /data is not JSON is still searched, and a script "
+          "that loads the id in a call is a hard break  <-- pinned defect")
     check(raw_hits[0]["path"] == "(not json)",
           "and says so instead of inventing a path")
+    def raw_kind(line):
+        hits = scan_payload(TARGET, line % TARGET, "data")
+        return [hit["kind"] for hit in hits]
+    check(raw_kind("Item(gis, itemid=\"%s\")") == [HARD]
+          and raw_kind("lyr = gis.content.get('%s')") == [HARD]
+          and raw_kind("import x\nrun(a, 'b', \"%s\")") == [HARD],
+          "a script that passes the id to a call, however the call is "
+          "written, is a hard break  <-- pinned defect")
+    check(raw_kind("# gis.content.get('%s')") == [MENTION]
+          and raw_kind("x = gis.content.get('ok')  # was %s") == [MENTION]
+          and raw_kind("ITEM = '%s'") == [MENTION]
+          and raw_kind("print(%s)") == [MENTION]
+          and raw_kind("the item %s is retired") == [MENTION]
+          and raw_kind("f(1)\nITEM = '%s'") == [MENTION],
+          "an id in a comment, an assignment, an unquoted word or prose is "
+          "still only a mention, and a call on an earlier line does not "
+          "count")
+    check(scan_payload(TARGET, {"description": "gis.content.get('%s')"
+                                % TARGET}, "data")[0]["kind"] == MENTION,
+          "the code shape is read in a body that is not json only: prose in "
+          "a json description stays a mention")
     check(scan_payload(TARGET, "no id in here", "data") == [],
           "text without the id yields nothing")
     check(scan_payload(TARGET, None, "data") == [],
@@ -3444,9 +3502,9 @@ def self_test():
           "an edge after forty dotted capital I is found at its own offset  "
           "<-- pinned defect")
     check(item_refs({}, [("data", "load('%s')" % W_DOC.upper())], known)
-          == {W_DOC: MENTION},
-          "an id in a body that is not json is a mention edge, found in upper "
-          "case too")
+          == {W_DOC: HARD},
+          "an id loaded by a script that is not json is a hard edge, found in "
+          "upper case too  <-- pinned defect")
 
     def edge(src, dst, kind):
         return {"from": src, "to": dst, "kind": kind}
@@ -4636,6 +4694,16 @@ def self_test():
               and not looks_like_html("print('<html>')"),
               "an HTML page starts with a doctype, html, head or body tag, in "
               "any case, and nothing else is taken for one")
+        started = time.time()
+        many_comments = looks_like_html("<!--a-->" * 500 + "x")
+        check(many_comments is False and time.time() - started < 1
+              and looks_like_html("<!--a-->" * 500 + "<html>") is True
+              and looks_like_html("<!-- a --> <!-- b -->\n<!DOCTYPE html>")
+              and not looks_like_html("<!-- never closed <html>")
+              and not looks_like_html("<!-->" + "<html>"),
+              "a body of 500 comments is judged in under a second, a page "
+              "behind comments is still a page and an unclosed comment hides "
+              "nothing  <-- pinned defect")
         cut_report = inspect(TARGET, catalog({"id": CUT_ID}), read)
         check([one["id"] for one in cut_report.unread] == [CUT_ID]
               and exit_code(cut_report) == 2,
@@ -4714,9 +4782,10 @@ def self_test():
         check(any(line.startswith("SOFT BREAK") and MAP_ID in line
                   for line in seen.splitlines()),
               "the web map that only filters on it is a soft break")
-        check(any(line.startswith("MENTION ONLY") and TEXT_ID in line
+        check(any(line.startswith("HARD BREAK") and TEXT_ID in line
                   for line in seen.splitlines()),
-              "the python attachment is a mention")
+              "the python attachment that loads it is a hard break, not a "
+              "mention  <-- pinned defect")
         check(any(line.startswith("MENTION ONLY") and DESC_ID in line
                   for line in seen.splitlines()),
               "and so is the item that names it in a description")
@@ -4728,7 +4797,7 @@ def self_test():
         check(BIG_ID in seen, "and so is the one too large to fetch")
         check(LIVE_TOKEN not in seen,
               "the token never reaches stdout  <-- pinned defect")
-        check("4 hard, 1 soft, 2 mention only" in seen,
+        check("5 hard, 1 soft, 1 mention only" in seen,
               "and the tail counts every class")
 
         code, seen = captured(lambda: main(
@@ -4953,7 +5022,14 @@ def self_test():
             ("a PWD value after a space in a connection string",
              "conn = 'Server=db;PWD POSPW99'; item = '%s'" % TARGET),
             ("a quoted value after the word password",
-             'login(password "POSPW99"); item = "%s"' % TARGET))
+             'login(password "POSPW99"); item = "%s"' % TARGET),
+            ("a positional password in a connect() call of a notebook cell",
+             {"cells": [{"cell_type": "code", "source":
+                         "connect('x', 'ops', 'POSPW99') # %s" % TARGET}]}),
+            ("a positional password in a helper whose name holds login",
+             "db_Login(host, 'ops', \"POSPW99\"); item = '%s'" % TARGET),
+            ("a positional password in an authenticate call",
+             "svc.authenticate('h', 'ops', 'POSPW99'); item = '%s'" % TARGET))
         for pw_label, pw_src in pw_shapes:
             pw_report = inspect(
                 TARGET, {sitem: {"title": "t", "type": "Code Attachment",
@@ -4971,6 +5047,10 @@ def self_test():
                   "%s reaches neither the console, the json report nor the "
                   "csv, and the id beside it is kept  <-- pinned defect"
                   % pw_label)
+        check(scrub("connect(url, 'ops', pw); login('a', 'b')") ==
+              "connect(url, 'ops', pw); login('a', 'b')",
+              "a connect call whose password is a variable, and a login call "
+              "of two arguments, are left alone")
         check(scrub("sign in with GIS(url, user, pw) then run") ==
               "sign in with GIS(url, user, pw) then run"
               and scrub('GIS(url, "user", password)') ==

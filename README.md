@@ -86,7 +86,7 @@ PASS  an item whose only occurrence is the target's THUMBNAIL yields NOTHING, wh
 ...
 PASS  an item referencing a LONGER id that contains the target is not a reference  <-- pinned defect
 PASS  an id used as a dictionary KEY is found, which is how Experience Builder names a layer data source  <-- pinned defect
-PASS  an item whose /data is not JSON is still searched, as prose  <-- pinned defect
+PASS  an item whose /data is not JSON is still searched, and a script that loads the id in a call is a hard break  <-- pinned defect
 ...
 PASS  and the token sitting beside the id in that very url is redacted out of the excerpt  <-- pinned defect
 ...
@@ -292,10 +292,10 @@ PASS  a prefix of --dashboard is refused, because it names a file the run will w
 ...
 PASS  importing the tool runs no sweep and prints nothing, so it can be used as a library
 --------------------------------------------------------------------
-885 assertions, 0 failed
+893 assertions, 0 failed
 ```
 
-The full run prints all 885 assertions. It printed the same 885 lines on Windows under
+The full run prints all 893 assertions. It printed the same 893 lines on Windows under
 Python 3.13, 3.12 and 3.9, and on Linux under Python 3.12. The `...` lines above are where this
 block is cut.
 
@@ -365,7 +365,7 @@ service url: 127.0.0.1:62206/arcgis/rest/services/sites/featureserver
 searching the configuration of 11 item(s)
   HARD BREAK 0b000000000000000000000000000000 (Nightly refresh)
   HARD BREAK 5a000000000000000000000000000000 (How sites work)
-  MENTION ONLY 7e000000000000000000000000000000 (refresh.py)
+  HARD BREAK 7e000000000000000000000000000000 (refresh.py)
   SOFT BREAK ac000000000000000000000000000000 (Site map)
   HARD BREAK da000000000000000000000000000000 (Site board ??)
   MENTION ONLY dc000000000000000000000000000000 (Archive notes)
@@ -383,6 +383,9 @@ HARD BREAK   5a000000000000000000000000000000  How sites work [StoryMap]
              a1b2c3d4e5f60718293a4b5c6d7e8f90
              resources/draft_x.json: resources/r-1/data/itemId (x1)
              a1b2c3d4e5f60718293a4b5c6d7e8f90
+HARD BREAK   7e000000000000000000000000000000  refresh.py [Code Attachment]
+             data: (not json) (x1)
+             import arcgis lyr = gis.content.get('a1b2c3d4e5f60718293a4b5c6d7e8f90') # nightly refresh
 HARD BREAK   da000000000000000000000000000000  Site board ?? [Dashboard]
              data: datasets/dataSource/itemId (x1)
              a1b2c3d4e5f60718293a4b5c6d7e8f90
@@ -398,14 +401,11 @@ SOFT BREAK   ac000000000000000000000000000000  Site map [Web Map]
              SOURCE_ID = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
              data: operationalLayers/popupInfo/description (x1)
              joined to a1b2c3d4e5f60718293a4b5c6d7e8f90
-MENTION ONLY 7e000000000000000000000000000000  refresh.py [Code Attachment]
-             data: (not json) (x1)
-             import arcgis lyr = gis.content.get('a1b2c3d4e5f60718293a4b5c6d7e8f90') # nightly refresh
 MENTION ONLY dc000000000000000000000000000000  Archive notes [Document Link]
              metadata: description (x1)
              superseded by a1b2c3d4e5f60718293a4b5c6d7e8f90, keep for audit
 
-4 hard, 1 soft, 2 mention only, over 10 item(s) searched
+5 hard, 1 soft, 1 mention only, over 10 item(s) searched
 
 2 item(s) COULD NOT BE READ, so they are not clean, they are unknown:
   b1000000000000000000000000000000 Plot delivery: 33554433 byte item was not fetched, over the 33554432 byte limit, so its configuration was never searched
@@ -762,13 +762,17 @@ Each occurrence is classified by the path it sits at, not by the file it came fr
 
 | Class | Means | Examples |
 |---|---|---|
-| `HARD BREAK` | the item loads the target at draw time | `operationalLayers/itemId`, `dataSources/.../itemId`, `datasets/dataSource/itemId`, a notebook code cell |
+| `HARD BREAK` | the item loads the target at draw time | `operationalLayers/itemId`, `dataSources/.../itemId`, `datasets/dataSource/itemId`, a notebook code cell, a script that passes the id to a call |
 | `SOFT BREAK` | the item references the target without drawing it | `definitionExpression`, `bookmarks`, `popupInfo` |
-| `MENTION ONLY` | somebody typed the id into prose | `description`, `snippet`, a markdown notebook cell |
+| `MENTION ONLY` | somebody typed the id into prose | `description`, `snippet`, a markdown notebook cell, a comment or an assignment in a script |
 
 The innermost key wins, so a `definitionExpression` inside `operationalLayers` is a filter and
 not a layer. Prose caps the class downwards, so an id typed into a layer's description is a
-mention whatever structure surrounds it.
+mention whatever structure surrounds it. A body that is not JSON, such as a Python file in a Code
+Attachment, has no keys, so the code around the id decides. An id inside a string literal on a line
+that has an open parenthesis before it and no `#` before it, as in `gis.content.get('<id>')`, is an
+argument of a call and is a `HARD BREAK`. An id in a comment, an assignment, a docstring or a
+sentence stays a `MENTION ONLY`.
 
 It refuses, or reports as unknown, rather than guessing:
 
@@ -907,8 +911,9 @@ item that could not be read, with the caller's own token removed from it even wh
 sits in front. The operator's own token and password, once signed in, are removed from every title,
 excerpt, source and path as well, wherever they sit and under any key or none, but only when they
 are at least six characters long, because a shorter one would also remove ordinary words. A sign-in
-call with a quoted third argument, `GIS(url, "user", "...")` or `arcpy.SignInToPortal(url, "user",
-"...")`, loses that argument. A value after a command line option and a space or comma, such as
+call with a quoted third argument, `GIS(url, "user", "...")`, `arcpy.SignInToPortal(url, "user",
+"...")` or `connect(host, "user", "...")`, loses that argument. So does any call whose name holds
+`connect`, `login`, `logon`, `signin`, `sign_in` or `authenticate`, in any case. A value after a command line option and a space or comma, such as
 `--password VALUE`, `-Password 'VALUE'` and `"--password", "VALUE"`, is replaced, and so is a value
 after `pwd` or `passwd` and a space, or a quoted value after the word `password`. The self-test
 asserts that no credential reaches stdout or either file.
@@ -960,9 +965,11 @@ and `taken`. The self-test asserts that no credential reaches this file either.
 - Apart from the bare shapes named under "Output", only a secret that follows a key name this tool knows is scrubbed: `token`, `password`,
   `apikey`, `api_key`, `code_verifier`, `signature`, `secret` and `sig`, with any prefix such as
   `access_`, and the compound names `secret_key`, `access_key`, `account_key`, `private_key`,
-  `auth_key`, `access_token`, `refresh_token`, `auth_token` and `session_token`. A positional password is recognised only as the third quoted argument of `GIS(` or
-  `SignInToPortal(`. Any other call that takes a password without a key name, such as `connect(user, "...")`, is not recognised and is printed in
-  the excerpt. So is an unquoted value after the word `password` and a space.
+  `auth_key`, `access_token`, `refresh_token`, `auth_token` and `session_token`. A positional password is recognised only as the third quoted argument of `GIS(`,
+  `SignInToPortal(` or a call whose name holds `connect`, `login`, `logon`, `signin`, `sign_in` or
+  `authenticate`, such as `connect(host, "user", "...")`. A password in any other call, or in the second
+  argument of a two-argument login, is not recognised and is printed in the excerpt. So is an
+  unquoted value after the word `password` and a space.
 - A string with no separator in it that holds the target id thousands of times, such as ids
   joined by dashes, is slow to search. Each match reads the whole string again, so 2,000
   matches in one string took about ten seconds.
@@ -1190,6 +1197,29 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   user may access.
 - The CLI path to the CSV writer is tested with plain text, and the formula guard with direct
   calls to the writer. The two are covered by separate tests.
+- Git history, earlier commits and not HEAD, holds the placeholder host `county.maps.arcgis.com` and the
+  account name `gis_admin` in old usage lines. Neither names a real county, so this is not a leak. A
+  history rewrite is only needed if the maintainer wants no trace.
+- The tool never reads its own CSV back, so there is no strip-on-read and no round trip. A CSV given
+  to `--compare` is refused with exit 64. A reader who expects a round trip gets none.
+- A target whose service url is refused as a needle, because it is a bare server or a viewer url
+  that opens another item, is not counted as unproven. The run can exit 0 although that url was
+  never searched for. The id was searched.
+- The key `url` is a hard key, so a link from an item to the target's item page, such as a viewer
+  url in a story button, is a `HARD BREAK`. That over-reports and keeps exit 1.
+- In a body that is not JSON, the code rule reads one line. A call split over several lines is a
+  mention, and a `print()` of the id is a hard break. A `#` before the id on the same line, even
+  inside a string, makes it a mention.
+- Python 3.9, 3.12 and 3.13 on Windows and 3.12 on Linux were run. Other versions were not. The
+  ArcGIS Pro conda environment run and the `arcgis` 2.4.2 behaviour in the opening were not
+  repeated for this version of the file, and `arcgis` is not installed where the self-test ran.
+- The operator's own password is removed only as typed. A percent-encoded copy with no key name
+  beside it is printed as found.
+- A token passed with `--token` is visible in argv, shell history and process-creation logs. Set
+  `WHOBREAKS_TOKEN` instead. A token goes in the query string of every read, so a proxy or web
+  server that logs urls records it.
+- The scrubber misses a `bearer`, `jwt`, `session`, `cookie` or `secretAnswer` key and a line of
+  prose such as `login bob / pw`. Those print as written next to the target id.
 - `--self-test` takes about 40 seconds, because it starts a loopback server and makes many HTTP calls.
 - The description of `f1729/whobreaks` in "Related" was checked against that repository's GitHub
   description only, not against its code.
