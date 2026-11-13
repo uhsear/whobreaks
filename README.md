@@ -321,7 +321,7 @@ needs a portal that the stand-in cannot play.
 
 Python 3.9 or newer. Standard library only: `urllib`, `json`, `csv`, `re`, `ssl`, `os`, `io`,
 `argparse`, `datetime`, `getpass`, `html`, `time`, and `http.server`, `threading`, `socket`, `tempfile`,
-`shutil`, `email` and `importlib` inside the self-test. It ran on a cloned ArcGIS Pro conda environment (Python 3.13.7) and on a plain `python3`. The default `arcgispro-py3` environment was not run.
+`shutil`, `email`, `importlib` and `posixpath` inside the self-test. It ran on a cloned ArcGIS Pro conda environment (Python 3.13.7) and on a plain `python3`. The default `arcgispro-py3` environment was not run.
 `arcpy` is not used and the `arcgis` package is not needed.
 
 ```
@@ -1099,9 +1099,11 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   in and writes nothing to the organization, but it is a POST.
 - `--token` with an `http://` url on a host that is not loopback sends the token in the query
   string in clear. Only `--username` is refused on `http://`.
-- `urllib` follows a redirect from the portal to another host with the token still in the query
-  string, and the tool does not stop it. That includes a redirect from `https://` to `http://`,
-  which sends the token in clear. Trust the portal url and any proxy in front of it.
+- `urllib` follows a redirect from the portal to another host, including from `https://` to
+  `http://`, and the tool does not stop it. The token goes along only when the `Location` header
+  repeats the query string, for example an `http://` to `https://` redirect that keeps it. A
+  `Location` with no query reaches the other host with no token. Trust the portal url and any
+  proxy in front of it.
 - A search-result id and a resource name from an item are put in the request path as they are. A
   resource name that holds `../` can make a read of another endpoint on the same portal host with
   your token. It is a GET, and never another host.
@@ -1210,9 +1212,10 @@ and `taken`. The self-test asserts that no credential reaches this file either.
 - In a body that is not JSON, the code rule reads one line. A call split over several lines is a
   mention, and a `print()` of the id is a hard break. A `#` before the id on the same line, even
   inside a string, makes it a mention.
-- Python 3.9, 3.12 and 3.13 on Windows and 3.12 on Linux were run. Other versions were not. The
-  ArcGIS Pro conda environment run and the `arcgis` 2.4.2 behaviour in the opening were not
-  repeated for this version of the file, and `arcgis` is not installed where the self-test ran.
+- Python 3.9, 3.12 and 3.13 on Windows, the cloned ArcGIS Pro conda environment (3.13.7) and 3.12
+  on Linux were run on this version of the file. Other versions were not. The `arcgis` 2.4.2
+  behaviour in the opening was not re-checked for this version, and `arcgis` is not installed where
+  the self-test ran.
 - The operator's own password is removed only as typed. A percent-encoded copy with no key name
   beside it is printed as found.
 - A token passed with `--token` is visible in argv, shell history and process-creation logs. Set
