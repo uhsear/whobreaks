@@ -1199,9 +1199,16 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   user may access.
 - The CLI path to the CSV writer is tested with plain text, and the formula guard with direct
   calls to the writer. The two are covered by separate tests.
-- Git history, earlier commits and not HEAD, holds the placeholder host `county.maps.arcgis.com` and the
-  account name `gis_admin` in old usage lines. Neither names a real county, so this is not a leak. A
-  history rewrite is only needed if the maintainer wants no trace.
+- A private key pasted as a bare PEM block, with no key name before it, is printed as written if it
+  sits inside the excerpt window.
+- A body that holds a run of many thousands of backslashes makes the credential scrubber very slow:
+  4,000 in a row took about 0.5 seconds and 8,000 took about 2 seconds, and the cost grows with the
+  square of the run. One such item can stall a sweep until it is stopped. The sweep then ends with no
+  verdict, not a wrong one.
+- The token from `--username` is issued for a referer, and the requests send no `Referer` header.
+  Whether a real portal accepts that was not tried. If it does not, every read fails and the run exits 2.
+- Only the dashboard is written by rename. A JSON report or a CSV that fails partway leaves a cut
+  file in place of the earlier one.
 - The tool never reads its own CSV back, so there is no strip-on-read and no round trip. A CSV given
   to `--compare` is refused with exit 64. A reader who expects a round trip gets none.
 - A target whose service url is refused as a needle, because it is a bare server or a viewer url
@@ -1223,7 +1230,7 @@ and `taken`. The self-test asserts that no credential reaches this file either.
   server that logs urls records it.
 - The scrubber misses a `bearer`, `jwt`, `session`, `cookie` or `secretAnswer` key and a line of
   prose such as `login bob / pw`. Those print as written next to the target id.
-- `--self-test` takes about 40 seconds, because it starts a loopback server and makes many HTTP calls.
+- `--self-test` takes under a minute, because it starts a loopback server and makes many HTTP calls.
 - The description of `f1729/whobreaks` in "Related" was checked against that repository's GitHub
   description only, not against its code.
 
